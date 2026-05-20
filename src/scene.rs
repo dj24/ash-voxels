@@ -93,10 +93,11 @@ pub struct SceneUniform {
     pub camera_right: Vec4,
     pub camera_up: Vec4,
     pub viewport: Vec4,
+    pub hud: Vec4,
 }
 
 impl SceneUniform {
-    pub fn new(camera: &Camera, viewport_extent: [u32; 2], object_count: u32) -> Self {
+    pub fn new(camera: &Camera, viewport_extent: [u32; 2], fps: f32) -> Self {
         let basis = camera.basis();
         let width = viewport_extent[0].max(1) as f32;
         let height = viewport_extent[1].max(1) as f32;
@@ -108,7 +109,8 @@ impl SceneUniform {
             camera_forward: basis.forward.extend(0.0),
             camera_right: basis.right.extend(0.0),
             camera_up: basis.up.extend(0.0),
-            viewport: Vec4::new(width, height, aspect, tan_half_fov + object_count as f32 * 0.0),
+            viewport: Vec4::new(width, height, aspect, tan_half_fov),
+            hud: Vec4::new(fps.max(0.0), 0.0, 0.0, 0.0),
         }
     }
 }

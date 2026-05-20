@@ -1,5 +1,120 @@
 #include "shared.hlsl"
 
+uint glyph_mask(int glyph)
+{
+    switch (glyph)
+    {
+        case 0: return 31599u;
+        case 1: return 29850u;
+        case 2: return 29671u;
+        case 3: return 31207u;
+        case 4: return 18925u;
+        case 5: return 31183u;
+        case 6: return 31695u;
+        case 7: return 18727u;
+        case 8: return 31727u;
+        case 9: return 31215u;
+        case 10: return 4815u;
+        case 11: return 4843u;
+        case 12: return 31183u;
+        default: return 0u;
+    }
+}
+
+bool glyph_contains_pixel(int2 local, uint mask, int scale)
+{
+    if (local.x < 0 || local.y < 0)
+    {
+        return false;
+    }
+
+    int column = local.x / scale;
+    int row = local.y / scale;
+    if (column >= 3 || row >= 5)
+    {
+        return false;
+    }
+
+    int inset = max(scale - 1, 1);
+    if ((local.x % scale) >= inset || (local.y % scale) >= inset)
+    {
+        return false;
+    }
+
+    uint bit = 1u << (row * 3 + column);
+    return (mask & bit) != 0u;
+}
+
+float4 overlay_fps_counter(uint2 launch_index, uint2 launch_size, float4 color)
+{
+    const int scale = 4;
+    const int glyph_width = scale * 3;
+    const int glyph_height = scale * 5;
+    const int glyph_gap = 3;
+    const int padding = 6;
+    const int panel_margin = 12;
+    const int slot_count = 8;
+
+    int2 panel_size = int2(
+        padding * 2 + slot_count * glyph_width + (slot_count - 1) * glyph_gap,
+        padding * 2 + glyph_height);
+    int2 panel_min = int2((int)launch_size.x - panel_size.x - panel_margin, panel_margin);
+    int2 panel_max = panel_min + panel_size;
+    int2 pixel = int2(launch_index);
+
+    if (pixel.x < panel_min.x || pixel.y < panel_min.y || pixel.x >= panel_max.x || pixel.y >= panel_max.y)
+    {
+        return color;
+    }
+
+    int fps = clamp((int)round(scene_uniform.hud.x), 0, 9999);
+    int glyphs[slot_count] = {
+        10,
+        11,
+        12,
+        -1,
+        fps >= 1000 ? fps / 1000 : -1,
+        fps >= 100 ? (fps / 100) % 10 : -1,
+        fps >= 10 ? (fps / 10) % 10 : -1,
+        fps % 10
+    };
+
+    float overlay_alpha = 0.6f;
+    float text_alpha = 0.0f;
+    int2 local = pixel - panel_min - int2(padding, padding);
+
+    [unroll]
+    for (int slot = 0; slot < slot_count; ++slot)
+    {
+        int glyph = glyphs[slot];
+        if (glyph < 0)
+        {
+            continue;
+        }
+
+        int glyph_x = slot * (glyph_width + glyph_gap);
+        int2 glyph_local = local - int2(glyph_x, 0);
+        if (glyph_contains_pixel(glyph_local, glyph_mask(glyph), scale))
+        {
+            text_alpha = 1.0f;
+            break;
+        }
+    }
+
+    float border = (
+        pixel.x == panel_min.x
+        || pixel.y == panel_min.y
+        || pixel.x == panel_max.x - 1
+        || pixel.y == panel_max.y - 1)
+        ? 1.0f
+        : 0.0f;
+    float3 background = lerp(float3(0.05f, 0.06f, 0.08f), float3(0.25f, 0.29f, 0.34f), border);
+    float3 composited = lerp(color.rgb, background, overlay_alpha);
+    composited = lerp(composited, float3(0.96f, 0.98f, 1.0f), text_alpha);
+
+    return float4(composited, color.a);
+}
+
 [shader("raygeneration")]
 void raygen_main()
 {
@@ -36,5 +151,5 @@ void raygen_main()
         ray,
         payload);
 
-    output_image[launch_index] = payload.color;
+    output_image[launch_index] = overlay_fps_counter(launch_index, launch_size, payload.color);
 }

@@ -5,6 +5,7 @@ struct SceneUniform
     float4 camera_right;
     float4 camera_up;
     float4 viewport;
+    float4 hud;
 };
 
 struct RenderObjectData

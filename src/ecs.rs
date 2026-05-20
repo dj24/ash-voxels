@@ -21,6 +21,7 @@ pub struct FrameTiming {
     pub last_frame: Instant,
     pub delta_seconds: f32,
     pub elapsed_seconds: f32,
+    pub smoothed_fps: f32,
 }
 
 impl Default for FrameTiming {
@@ -29,6 +30,7 @@ impl Default for FrameTiming {
             last_frame: Instant::now(),
             delta_seconds: 0.0,
             elapsed_seconds: 0.0,
+            smoothed_fps: 0.0,
         }
     }
 }
@@ -105,6 +107,14 @@ pub fn begin_frame(world: &mut World, now: Instant, width: u32, height: u32) {
     timing.delta_seconds = (now - timing.last_frame).as_secs_f32();
     timing.elapsed_seconds += timing.delta_seconds;
     timing.last_frame = now;
+    if timing.delta_seconds > 0.0 {
+        let instantaneous_fps = timing.delta_seconds.recip();
+        timing.smoothed_fps = if timing.smoothed_fps == 0.0 {
+            instantaneous_fps
+        } else {
+            timing.smoothed_fps + (instantaneous_fps - timing.smoothed_fps) * 0.1
+        };
+    }
 
     let mut window_size = world.resource_mut::<WindowSize>();
     window_size.width = width;
@@ -163,6 +173,7 @@ fn animate_object(timing: Res<FrameTiming>, mut query: Query<&mut VoxelProcedura
 fn extract_scene(
     camera_query: Query<&Camera>,
     object_query: Query<&VoxelProceduralObject>,
+    timing: Res<FrameTiming>,
     window_size: Res<WindowSize>,
     mut extracted: ResMut<ExtractedScene>,
 ) {
@@ -174,6 +185,6 @@ fn extract_scene(
     extracted.camera = SceneUniform::new(
         camera,
         [window_size.width.max(1), window_size.height.max(1)],
-        extracted.objects.len() as u32,
+        timing.smoothed_fps,
     );
 }
