@@ -14,14 +14,16 @@ const SHADERS: &[(&str, &str)] = &[
 ];
 
 fn main() {
-    let manifest_dir = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
+    let manifest_dir =
+        PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
     let shader_dir = manifest_dir.join("shaders");
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR")).join("shaders");
 
     println!("cargo:rerun-if-changed={}", shader_dir.display());
     fs::create_dir_all(&out_dir).expect("create shader output directory");
 
-    let dxc = find_dxc().expect("Unable to find dxc.exe. Install the Vulkan SDK or add dxc to PATH.");
+    let dxc =
+        find_dxc().expect("Unable to find dxc.exe. Install the Vulkan SDK or add dxc to PATH.");
 
     for (file_name, entry_point) in SHADERS {
         let source = shader_dir.join(file_name);
@@ -52,7 +54,9 @@ fn main() {
 
 fn find_dxc() -> Option<PathBuf> {
     if let Some(vulkan_sdk) = env::var_os("VULKAN_SDK") {
-        let candidate = PathBuf::from(vulkan_sdk).join("Bin").join(if cfg!(windows) { "dxc.exe" } else { "dxc" });
+        let candidate = PathBuf::from(vulkan_sdk)
+            .join("Bin")
+            .join(if cfg!(windows) { "dxc.exe" } else { "dxc" });
         if candidate.exists() {
             return Some(candidate);
         }

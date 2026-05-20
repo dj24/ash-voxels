@@ -1,5 +1,47 @@
 #include "shared.hlsl"
 
+uint flatten_index(uint3 position, uint3 dimensions)
+{
+    return position.x + dimensions.x * (position.y + dimensions.y * position.z);
+}
+
+float occupancy_at(int3 position, uint3 dimensions)
+{
+    if (any(position < 0) || any(position >= int3(dimensions)))
+    {
+        return 0.0f;
+    }
+
+    return voxel_occupancy[flatten_index(uint3(position), dimensions)] == 0u ? 0.0f : 1.0f;
+}
+
+float3 fallback_normal(float3 direction, int last_axis, int3 step_dir)
+{
+    if (last_axis == 0)
+    {
+        return float3(-step_dir.x, 0.0f, 0.0f);
+    }
+    if (last_axis == 1)
+    {
+        return float3(0.0f, -step_dir.y, 0.0f);
+    }
+    if (last_axis == 2)
+    {
+        return float3(0.0f, 0.0f, -step_dir.z);
+    }
+
+    float3 axis = abs(direction);
+    if (axis.x >= axis.y && axis.x >= axis.z)
+    {
+        return float3(direction.x >= 0.0f ? -1.0f : 1.0f, 0.0f, 0.0f);
+    }
+    if (axis.y >= axis.z)
+    {
+        return float3(0.0f, direction.y >= 0.0f ? -1.0f : 1.0f, 0.0f);
+    }
+    return float3(0.0f, 0.0f, direction.z >= 0.0f ? -1.0f : 1.0f);
+}
+
 bool ray_box(float3 origin, float3 direction, float3 bmin, float3 bmax, out float t_enter, out float t_exit)
 {
     float3 inv_dir = 1.0f / direction;
@@ -15,17 +57,15 @@ bool ray_box(float3 origin, float3 direction, float3 bmin, float3 bmax, out floa
 [shader("intersection")]
 void intersection_main()
 {
-    RenderObjectData object = objects[0];
+    RenderObjectData object = objects[InstanceID()];
 
     float3 bounds_min = object.bounds_min.xyz;
     float3 bounds_max = object.bounds_max.xyz;
-    float3 sphere_center = object.sphere_center_radius.xyz;
-    float sphere_radius = object.sphere_center_radius.w;
-    float voxel_size = object.voxel_size_and_padding.x;
+    float voxel_size = object.voxel_size_and_dimensions.x;
     uint3 grid_dims = uint3(
-        max(1, (int)object.voxel_size_and_padding.y),
-        max(1, (int)object.voxel_size_and_padding.z),
-        max(1, (int)object.voxel_size_and_padding.w));
+        max(1, (int)object.voxel_size_and_dimensions.y),
+        max(1, (int)object.voxel_size_and_dimensions.z),
+        max(1, (int)object.voxel_size_and_dimensions.w));
 
     float3 origin = ObjectRayOrigin();
     float3 direction = ObjectRayDirection();
@@ -53,6 +93,7 @@ void intersection_main()
         (next_boundary - origin) / direction,
         abs(direction) > 1e-5f);
     float3 t_delta = abs(voxel_size / max(abs(direction), 1e-5f));
+    int last_axis = -1;
 
     [loop]
     for (uint step_index = 0; step_index < 512; ++step_index)
@@ -62,11 +103,17 @@ void intersection_main()
             return;
         }
 
-        float3 cell_center = bounds_min + (float3(cell) + 0.5f) * voxel_size;
-        if (distance(cell_center, sphere_center) <= sphere_radius)
+        if (occupancy_at(cell, grid_dims) > 0.5f)
         {
+            float3 gradient = float3(
+                occupancy_at(cell + int3(-1, 0, 0), grid_dims) - occupancy_at(cell + int3(1, 0, 0), grid_dims),
+                occupancy_at(cell + int3(0, -1, 0), grid_dims) - occupancy_at(cell + int3(0, 1, 0), grid_dims),
+                occupancy_at(cell + int3(0, 0, -1), grid_dims) - occupancy_at(cell + int3(0, 0, 1), grid_dims));
+
             HitAttributes attr;
-            attr.normal = normalize(cell_center - sphere_center);
+            attr.normal = length(gradient) > 1e-5f
+                ? normalize(gradient)
+                : fallback_normal(direction, last_axis, step_dir);
             ReportHit(max(t_enter, RayTMin()), 0, attr);
             return;
         }
@@ -76,18 +123,21 @@ void intersection_main()
             t_enter = t_max.x;
             t_max.x += t_delta.x;
             cell.x += step_dir.x;
+            last_axis = 0;
         }
         else if (t_max.y < t_max.z)
         {
             t_enter = t_max.y;
             t_max.y += t_delta.y;
             cell.y += step_dir.y;
+            last_axis = 1;
         }
         else
         {
             t_enter = t_max.z;
             t_max.z += t_delta.z;
             cell.z += step_dir.z;
+            last_axis = 2;
         }
 
         if (t_enter > t_exit)

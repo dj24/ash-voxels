@@ -12,11 +12,7 @@ use winit::{
     window::Window,
 };
 
-use crate::{
-    ecs,
-    render::Renderer,
-    vk::AppError,
-};
+use crate::{assets::VoxelModel, ecs, render::Renderer, vk::AppError};
 
 pub fn run() -> Result<(), AppError> {
     init_tracing();
@@ -55,7 +51,8 @@ impl AppState {
             .map_err(|error| AppError::Message(error.to_string()))?;
 
         let initial_size = window.inner_size();
-        let mut world = ecs::create_world([initial_size.width, initial_size.height]);
+        let voxel_model = VoxelModel::load_dragon()?;
+        let mut world = ecs::create_world([initial_size.width, initial_size.height], &voxel_model);
         let schedule = ecs::create_schedule();
 
         let renderer = Renderer::new(
@@ -69,6 +66,7 @@ impl AppState {
                 .map_err(|error| AppError::Message(error.to_string()))?
                 .as_raw(),
             [initial_size.width, initial_size.height],
+            &voxel_model,
         )?;
 
         info!("Using GPU {}", renderer.device_caps().device_name);
@@ -90,7 +88,10 @@ impl AppState {
 
         ecs::begin_frame(&mut self.world, Instant::now(), size.width, size.height);
         self.schedule.run(&mut self.world);
-        let extracted = self.world.resource::<crate::scene::ExtractedScene>().clone();
+        let extracted = self
+            .world
+            .resource::<crate::scene::ExtractedScene>()
+            .clone();
         self.renderer.render(&extracted)
     }
 }

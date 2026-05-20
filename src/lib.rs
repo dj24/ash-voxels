@@ -1,4 +1,5 @@
 pub mod app;
+pub mod assets;
 pub mod ecs;
 pub mod render;
 pub mod scene;

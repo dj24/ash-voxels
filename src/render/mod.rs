@@ -19,12 +19,16 @@ use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 use tracing::{info, warn};
 
 use crate::{
-    scene::{ExtractedScene, RenderObjectData, VoxelProceduralObject},
+    assets::VoxelModel,
+    scene::{
+        ExtractedScene, RenderObjectData, SPHERE_GRID_COUNT, VoxelProceduralObject,
+        sphere_grid_positions,
+    },
     shader_build::compiled_shader_artifacts,
     vk::AppError,
 };
 
-const MAX_OBJECTS: usize = 64;
+const MAX_OBJECTS: usize = SPHERE_GRID_COUNT;
 const VALIDATION_LAYER: &CStr = c"VK_LAYER_KHRONOS_validation";
 const DEVICE_EXTENSIONS: &[&CStr] = &[
     ash::khr::swapchain::NAME,
@@ -71,6 +75,7 @@ pub struct Renderer {
     output_image: AllocatedImage,
     uniform_buffer: AllocatedBuffer,
     object_buffer: AllocatedBuffer,
+    voxel_buffer: AllocatedBuffer,
     descriptor_pool: vk::DescriptorPool,
     descriptor_set_layout: vk::DescriptorSetLayout,
     descriptor_set: vk::DescriptorSet,
@@ -89,8 +94,10 @@ impl Renderer {
         display_handle: RawDisplayHandle,
         window_handle: RawWindowHandle,
         initial_size: [u32; 2],
+        model: &VoxelModel,
     ) -> Result<Self, AppError> {
-        let entry = unsafe { Entry::load() }.map_err(|error| AppError::Message(error.to_string()))?;
+        let entry =
+            unsafe { Entry::load() }.map_err(|error| AppError::Message(error.to_string()))?;
 
         let available_layers = unsafe { entry.enumerate_instance_layer_properties()? };
         let enable_validation = cfg!(debug_assertions)
@@ -98,7 +105,8 @@ impl Renderer {
                 CStr::from_ptr(layer.layer_name.as_ptr()) == VALIDATION_LAYER
             });
 
-        let mut extension_names = ash_window::enumerate_required_extensions(display_handle)?.to_vec();
+        let mut extension_names =
+            ash_window::enumerate_required_extensions(display_handle)?.to_vec();
         if enable_validation {
             extension_names.push(ash::ext::debug_utils::NAME.as_ptr());
         }
@@ -123,7 +131,8 @@ impl Renderer {
             .enabled_layer_names(&layer_names);
 
         let instance = unsafe { entry.create_instance(&instance_info, None)? };
-        let debug_utils = enable_validation.then(|| ash::ext::debug_utils::Instance::new(&entry, &instance));
+        let debug_utils =
+            enable_validation.then(|| ash::ext::debug_utils::Instance::new(&entry, &instance));
         let debug_messenger = debug_utils
             .as_ref()
             .map(|loader| {
@@ -152,13 +161,15 @@ impl Renderer {
         let queue_family_index =
             pick_queue_family(&instance, &surface_loader, physical_device, surface)?;
 
-        let device_extensions: Vec<*const i8> = DEVICE_EXTENSIONS.iter().map(|name| name.as_ptr()).collect();
+        let device_extensions: Vec<*const i8> =
+            DEVICE_EXTENSIONS.iter().map(|name| name.as_ptr()).collect();
         let priorities = [1.0f32];
         let queue_info = [vk::DeviceQueueCreateInfo::default()
             .queue_family_index(queue_family_index)
             .queue_priorities(&priorities)];
 
-        let mut descriptor_indexing_features = vk::PhysicalDeviceDescriptorIndexingFeatures::default();
+        let mut descriptor_indexing_features =
+            vk::PhysicalDeviceDescriptorIndexingFeatures::default();
         let mut buffer_device_address_features =
             vk::PhysicalDeviceBufferDeviceAddressFeatures::default().buffer_device_address(true);
         let mut acceleration_structure_features =
@@ -167,7 +178,8 @@ impl Renderer {
                 .descriptor_binding_acceleration_structure_update_after_bind(false);
         let mut ray_tracing_features =
             vk::PhysicalDeviceRayTracingPipelineFeaturesKHR::default().ray_tracing_pipeline(true);
-        let mut ray_query_features = vk::PhysicalDeviceRayQueryFeaturesKHR::default().ray_query(true);
+        let mut ray_query_features =
+            vk::PhysicalDeviceRayQueryFeaturesKHR::default().ray_query(true);
 
         let mut requested_features = vk::PhysicalDeviceFeatures2::default()
             .push_next(&mut descriptor_indexing_features)
@@ -190,7 +202,8 @@ impl Renderer {
             ));
         }
 
-        let mut device_descriptor_indexing = vk::PhysicalDeviceDescriptorIndexingFeatures::default();
+        let mut device_descriptor_indexing =
+            vk::PhysicalDeviceDescriptorIndexingFeatures::default();
         let mut device_bda =
             vk::PhysicalDeviceBufferDeviceAddressFeatures::default().buffer_device_address(true);
         let mut device_as = vk::PhysicalDeviceAccelerationStructureFeaturesKHR::default()
@@ -297,6 +310,7 @@ impl Renderer {
             output_image: AllocatedImage::default(),
             uniform_buffer: AllocatedBuffer::default(),
             object_buffer: AllocatedBuffer::default(),
+            voxel_buffer: AllocatedBuffer::default(),
             descriptor_pool: vk::DescriptorPool::null(),
             descriptor_set_layout: vk::DescriptorSetLayout::null(),
             descriptor_set: vk::DescriptorSet::null(),
@@ -323,7 +337,17 @@ impl Renderer {
             vk::BufferUsageFlags::STORAGE_BUFFER,
             MemoryLocation::CpuToGpu,
         )?;
-        renderer.scene_acceleration = renderer.create_scene_acceleration()?;
+        renderer.voxel_buffer = renderer.create_buffer(
+            "voxel occupancy",
+            (size_of::<u32>() * model.occupancy.len()) as u64,
+            vk::BufferUsageFlags::STORAGE_BUFFER,
+            MemoryLocation::CpuToGpu,
+        )?;
+        write_bytes(
+            &mut renderer.voxel_buffer,
+            bytemuck::cast_slice(&model.occupancy),
+        )?;
+        renderer.scene_acceleration = renderer.create_scene_acceleration(model)?;
         renderer.create_pipeline_and_sbt()?;
         renderer.update_descriptor_set()?;
 
@@ -360,7 +384,8 @@ impl Renderer {
         self.upload_scene(scene)?;
 
         unsafe {
-            self.device.wait_for_fences(&[self.in_flight], true, u64::MAX)?;
+            self.device
+                .wait_for_fences(&[self.in_flight], true, u64::MAX)?;
             self.device.reset_fences(&[self.in_flight])?;
         }
 
@@ -405,7 +430,8 @@ impl Renderer {
                 .command_buffers(&command_buffers)
                 .signal_semaphores(&signal_semaphores);
 
-            self.device.queue_submit(self.graphics_queue, &[submit_info], self.in_flight)?;
+            self.device
+                .queue_submit(self.graphics_queue, &[submit_info], self.in_flight)?;
 
             let swapchains = [self.swapchain];
             let image_indices = [image_index];
@@ -415,7 +441,10 @@ impl Renderer {
                 .swapchains(&swapchains)
                 .image_indices(&image_indices);
 
-            match self.swapchain_loader.queue_present(self.graphics_queue, &present_info) {
+            match self
+                .swapchain_loader
+                .queue_present(self.graphics_queue, &present_info)
+            {
                 Ok(needs_resize) if needs_resize || suboptimal => {
                     self.recreate_swapchain(self.extent.width, self.extent.height)?;
                     self.update_descriptor_set()?;
@@ -471,20 +500,21 @@ impl Renderer {
             .unwrap_or(vk::PresentModeKHR::FIFO);
 
         self.extent = vk::Extent2D {
-            width: width
-                .clamp(
-                    capabilities.min_image_extent.width.max(1),
-                    capabilities.max_image_extent.width.max(1),
-                ),
-            height: height
-                .clamp(
-                    capabilities.min_image_extent.height.max(1),
-                    capabilities.max_image_extent.height.max(1),
-                ),
+            width: width.clamp(
+                capabilities.min_image_extent.width.max(1),
+                capabilities.max_image_extent.width.max(1),
+            ),
+            height: height.clamp(
+                capabilities.min_image_extent.height.max(1),
+                capabilities.max_image_extent.height.max(1),
+            ),
         };
 
-        let desired_image_count = (capabilities.min_image_count + 1)
-            .min(capabilities.max_image_count.max(capabilities.min_image_count + 1));
+        let desired_image_count = (capabilities.min_image_count + 1).min(
+            capabilities
+                .max_image_count
+                .max(capabilities.min_image_count + 1),
+        );
 
         let usage = vk::ImageUsageFlags::TRANSFER_DST;
         if !capabilities.supported_usage_flags.contains(usage) {
@@ -513,7 +543,10 @@ impl Renderer {
         let output_image = self.create_output_image(self.extent, chosen_format.format)?;
 
         if self.swapchain != vk::SwapchainKHR::null() {
-            unsafe { self.swapchain_loader.destroy_swapchain(self.swapchain, None) };
+            unsafe {
+                self.swapchain_loader
+                    .destroy_swapchain(self.swapchain, None)
+            };
         }
         destroy_image_with(&self.device, &mut self.allocator, &mut self.output_image)?;
 
@@ -549,9 +582,14 @@ impl Renderer {
                 .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
                 .descriptor_count(1)
                 .stage_flags(
-                    vk::ShaderStageFlags::RAYGEN_KHR
-                        | vk::ShaderStageFlags::INTERSECTION_KHR
-                        | vk::ShaderStageFlags::CLOSEST_HIT_KHR,
+                    vk::ShaderStageFlags::INTERSECTION_KHR | vk::ShaderStageFlags::CLOSEST_HIT_KHR,
+                ),
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(4)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .descriptor_count(1)
+                .stage_flags(
+                    vk::ShaderStageFlags::INTERSECTION_KHR | vk::ShaderStageFlags::CLOSEST_HIT_KHR,
                 ),
         ];
 
@@ -577,7 +615,7 @@ impl Renderer {
             },
             vk::DescriptorPoolSize {
                 ty: vk::DescriptorType::STORAGE_BUFFER,
-                descriptor_count: 1,
+                descriptor_count: 2,
             },
         ];
 
@@ -599,8 +637,7 @@ impl Renderer {
 
         self.pipeline_layout = unsafe {
             self.device.create_pipeline_layout(
-                &vk::PipelineLayoutCreateInfo::default()
-                    .set_layouts(&[self.descriptor_set_layout]),
+                &vk::PipelineLayoutCreateInfo::default().set_layouts(&[self.descriptor_set_layout]),
                 None,
             )?
         };
@@ -608,8 +645,12 @@ impl Renderer {
         Ok(())
     }
 
-    fn create_scene_acceleration(&mut self) -> Result<SceneAcceleration, AppError> {
-        let object = VoxelProceduralObject::default();
+    fn create_scene_acceleration(
+        &mut self,
+        model: &VoxelModel,
+    ) -> Result<SceneAcceleration, AppError> {
+        let object = VoxelProceduralObject::from(model);
+        let instance_positions = sphere_grid_positions();
         let aabb = vk::AabbPositionsKHR {
             min_x: object.bounds_min.x,
             min_y: object.bounds_min.y,
@@ -626,15 +667,12 @@ impl Renderer {
                 | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
             MemoryLocation::CpuToGpu,
         )?;
-        write_bytes(
-            &mut aabb_buffer,
-            unsafe {
-                std::slice::from_raw_parts(
-                    (&aabb as *const vk::AabbPositionsKHR).cast::<u8>(),
-                    size_of::<vk::AabbPositionsKHR>(),
-                )
-            },
-        )?;
+        write_bytes(&mut aabb_buffer, unsafe {
+            std::slice::from_raw_parts(
+                (&aabb as *const vk::AabbPositionsKHR).cast::<u8>(),
+                size_of::<vk::AabbPositionsKHR>(),
+            )
+        })?;
 
         let aabb_address = self.buffer_device_address(aabb_buffer.buffer);
         let geometry_aabb_data = vk::AccelerationStructureGeometryAabbsDataKHR::default()
@@ -646,7 +684,9 @@ impl Renderer {
         let geometry = vk::AccelerationStructureGeometryKHR::default()
             .geometry_type(vk::GeometryTypeKHR::AABBS)
             .flags(vk::GeometryFlagsKHR::OPAQUE)
-            .geometry(vk::AccelerationStructureGeometryDataKHR { aabbs: geometry_aabb_data });
+            .geometry(vk::AccelerationStructureGeometryDataKHR {
+                aabbs: geometry_aabb_data,
+            });
 
         let blas_geometries = [geometry];
         let mut blas_build_info = vk::AccelerationStructureBuildGeometryInfoKHR::default()
@@ -657,12 +697,13 @@ impl Renderer {
         let primitive_counts = [1u32];
         let mut blas_sizes = vk::AccelerationStructureBuildSizesInfoKHR::default();
         unsafe {
-            self.acceleration_loader.get_acceleration_structure_build_sizes(
-                vk::AccelerationStructureBuildTypeKHR::DEVICE,
-                &blas_build_info,
-                &primitive_counts,
-                &mut blas_sizes,
-            );
+            self.acceleration_loader
+                .get_acceleration_structure_build_sizes(
+                    vk::AccelerationStructureBuildTypeKHR::DEVICE,
+                    &blas_build_info,
+                    &primitive_counts,
+                    &mut blas_sizes,
+                );
         }
 
         let blas = self.create_acceleration_structure_resource(
@@ -691,44 +732,50 @@ impl Renderer {
         }];
 
         self.immediate_submit(|renderer, command_buffer| unsafe {
-            renderer.acceleration_loader.cmd_build_acceleration_structures(
-                command_buffer,
-                &[blas_build_info],
-                &[&blas_range],
-            );
+            renderer
+                .acceleration_loader
+                .cmd_build_acceleration_structures(
+                    command_buffer,
+                    &[blas_build_info],
+                    &[&blas_range],
+                );
         })?;
         destroy_buffer_with(&self.device, &mut self.allocator, &mut blas_scratch)?;
 
-        let instance = vk::AccelerationStructureInstanceKHR {
-            transform: vk::TransformMatrixKHR {
-                matrix: [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0],
-            },
-            instance_custom_index_and_mask: vk::Packed24_8::new(0, 0xFF),
-            instance_shader_binding_table_record_offset_and_flags: vk::Packed24_8::new(
-                0,
-                vk::GeometryInstanceFlagsKHR::TRIANGLE_FACING_CULL_DISABLE.as_raw() as u8,
-            ),
-            acceleration_structure_reference: vk::AccelerationStructureReferenceKHR {
-                device_handle: blas.device_address,
-            },
-        };
+        let instances = instance_positions
+            .iter()
+            .enumerate()
+            .map(|(index, position)| vk::AccelerationStructureInstanceKHR {
+                transform: vk::TransformMatrixKHR {
+                    matrix: [
+                        1.0, 0.0, 0.0, position.x, 0.0, 1.0, 0.0, position.y, 0.0, 0.0, 1.0,
+                        position.z,
+                    ],
+                },
+                instance_custom_index_and_mask: vk::Packed24_8::new(index as u32, 0xFF),
+                instance_shader_binding_table_record_offset_and_flags: vk::Packed24_8::new(
+                    0,
+                    vk::GeometryInstanceFlagsKHR::TRIANGLE_FACING_CULL_DISABLE.as_raw() as u8,
+                ),
+                acceleration_structure_reference: vk::AccelerationStructureReferenceKHR {
+                    device_handle: blas.device_address,
+                },
+            })
+            .collect::<Vec<_>>();
 
         let mut instance_buffer = self.create_buffer(
             "tlas instances",
-            size_of::<vk::AccelerationStructureInstanceKHR>() as u64,
+            (size_of::<vk::AccelerationStructureInstanceKHR>() * instances.len()) as u64,
             vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR
                 | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
             MemoryLocation::CpuToGpu,
         )?;
-        write_bytes(
-            &mut instance_buffer,
-            unsafe {
-                std::slice::from_raw_parts(
-                    (&instance as *const vk::AccelerationStructureInstanceKHR).cast::<u8>(),
-                    size_of::<vk::AccelerationStructureInstanceKHR>(),
-                )
-            },
-        )?;
+        write_bytes(&mut instance_buffer, unsafe {
+            std::slice::from_raw_parts(
+                instances.as_ptr().cast::<u8>(),
+                size_of::<vk::AccelerationStructureInstanceKHR>() * instances.len(),
+            )
+        })?;
 
         let instances_address = self.buffer_device_address(instance_buffer.buffer);
         let geometry_instances = vk::AccelerationStructureGeometryInstancesDataKHR::default()
@@ -748,15 +795,16 @@ impl Renderer {
             .flags(vk::BuildAccelerationStructureFlagsKHR::PREFER_FAST_TRACE)
             .mode(vk::BuildAccelerationStructureModeKHR::BUILD)
             .geometries(&tlas_geometries);
-        let tlas_counts = [1u32];
+        let tlas_counts = [instances.len() as u32];
         let mut tlas_sizes = vk::AccelerationStructureBuildSizesInfoKHR::default();
         unsafe {
-            self.acceleration_loader.get_acceleration_structure_build_sizes(
-                vk::AccelerationStructureBuildTypeKHR::DEVICE,
-                &tlas_build_info,
-                &tlas_counts,
-                &mut tlas_sizes,
-            );
+            self.acceleration_loader
+                .get_acceleration_structure_build_sizes(
+                    vk::AccelerationStructureBuildTypeKHR::DEVICE,
+                    &tlas_build_info,
+                    &tlas_counts,
+                    &mut tlas_sizes,
+                );
         }
 
         let tlas = self.create_acceleration_structure_resource(
@@ -778,18 +826,20 @@ impl Renderer {
             });
 
         let tlas_range = [vk::AccelerationStructureBuildRangeInfoKHR {
-            primitive_count: 1,
+            primitive_count: instances.len() as u32,
             primitive_offset: 0,
             first_vertex: 0,
             transform_offset: 0,
         }];
 
         self.immediate_submit(|renderer, command_buffer| unsafe {
-            renderer.acceleration_loader.cmd_build_acceleration_structures(
-                command_buffer,
-                &[tlas_build_info],
-                &[&tlas_range],
-            );
+            renderer
+                .acceleration_loader
+                .cmd_build_acceleration_structures(
+                    command_buffer,
+                    &[tlas_build_info],
+                    &[&tlas_range],
+                );
         })?;
         destroy_buffer_with(&self.device, &mut self.allocator, &mut tlas_scratch)?;
 
@@ -804,8 +854,16 @@ impl Renderer {
     fn create_pipeline_and_sbt(&mut self) -> Result<(), AppError> {
         let artifact_paths = compiled_shader_artifacts();
         let stage_defs = [
-            (artifact_paths[0].clone(), c"raygen_main", vk::ShaderStageFlags::RAYGEN_KHR),
-            (artifact_paths[1].clone(), c"miss_main", vk::ShaderStageFlags::MISS_KHR),
+            (
+                artifact_paths[0].clone(),
+                c"raygen_main",
+                vk::ShaderStageFlags::RAYGEN_KHR,
+            ),
+            (
+                artifact_paths[1].clone(),
+                c"miss_main",
+                vk::ShaderStageFlags::MISS_KHR,
+            ),
             (
                 artifact_paths[2].clone(),
                 c"closest_hit_main",
@@ -822,7 +880,8 @@ impl Renderer {
         let mut stages = Vec::new();
         for (path, entry_name, stage) in stage_defs {
             let bytes = std::fs::read(&path)?;
-            let code = read_spv(&mut Cursor::new(bytes)).map_err(|error| AppError::Message(error.to_string()))?;
+            let code = read_spv(&mut Cursor::new(bytes))
+                .map_err(|error| AppError::Message(error.to_string()))?;
             let module = unsafe {
                 self.device.create_shader_module(
                     &vk::ShaderModuleCreateInfo::default().code(&code),
@@ -885,19 +944,23 @@ impl Renderer {
         Ok(())
     }
 
-    fn create_shader_binding_table(&mut self, group_count: u32) -> Result<ShaderBindingTable, AppError> {
+    fn create_shader_binding_table(
+        &mut self,
+        group_count: u32,
+    ) -> Result<ShaderBindingTable, AppError> {
         let handle_size = self.device_caps.shader_group_handle_size as usize;
         let handle_alignment = self.device_caps.shader_group_base_alignment as usize;
         let aligned_handle_size = align_up(handle_size, align_of::<u64>());
         let region_stride = align_up(aligned_handle_size, handle_alignment);
 
         let handles = unsafe {
-            self.ray_tracing_pipeline_loader.get_ray_tracing_shader_group_handles(
-                self.pipeline,
-                0,
-                group_count,
-                handle_size * group_count as usize,
-            )?
+            self.ray_tracing_pipeline_loader
+                .get_ray_tracing_shader_group_handles(
+                    self.pipeline,
+                    0,
+                    group_count,
+                    handle_size * group_count as usize,
+                )?
         };
 
         let mut buffer = self.create_buffer(
@@ -911,7 +974,9 @@ impl Renderer {
             .allocation
             .as_mut()
             .and_then(Allocation::mapped_slice_mut)
-            .ok_or_else(|| AppError::Message("shader binding table buffer is not mapped".to_string()))?;
+            .ok_or_else(|| {
+                AppError::Message("shader binding table buffer is not mapped".to_string())
+            })?;
         for group in 0..group_count as usize {
             let src_offset = group * handle_size;
             let dst_offset = group * region_stride;
@@ -953,6 +1018,10 @@ impl Renderer {
             .buffer(self.object_buffer.buffer)
             .offset(0)
             .range(self.object_buffer.size)];
+        let voxel_info = [vk::DescriptorBufferInfo::default()
+            .buffer(self.voxel_buffer.buffer)
+            .offset(0)
+            .range(self.voxel_buffer.size)];
         let acceleration_structures = [self.scene_acceleration.tlas.handle];
         let mut acceleration_write = vk::WriteDescriptorSetAccelerationStructureKHR::default()
             .acceleration_structures(&acceleration_structures);
@@ -979,6 +1048,11 @@ impl Renderer {
                 .dst_binding(3)
                 .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
                 .buffer_info(&object_info),
+            vk::WriteDescriptorSet::default()
+                .dst_set(self.descriptor_set)
+                .dst_binding(4)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .buffer_info(&voxel_info),
         ];
 
         unsafe { self.device.update_descriptor_sets(&writes, &[]) };
@@ -987,7 +1061,9 @@ impl Renderer {
 
     fn upload_scene(&mut self, scene: &ExtractedScene) -> Result<(), AppError> {
         if scene.objects.is_empty() {
-            return Err(AppError::Message("extracted scene has no render objects".to_string()));
+            return Err(AppError::Message(
+                "extracted scene has no render objects".to_string(),
+            ));
         }
         if scene.objects.len() > MAX_OBJECTS {
             return Err(AppError::Message(format!(
@@ -1192,7 +1268,8 @@ impl Renderer {
             })
             .map_err(|error| AppError::Message(error.to_string()))?;
         unsafe {
-            self.device.bind_image_memory(image, allocation.memory(), allocation.offset())?;
+            self.device
+                .bind_image_memory(image, allocation.memory(), allocation.offset())?;
         }
 
         let view = unsafe {
@@ -1220,9 +1297,14 @@ impl Renderer {
         })
     }
 
-    fn pick_output_storage_format(&self, preferred_format: vk::Format) -> Result<vk::Format, AppError> {
-        let swapchain_props =
-            unsafe { self.instance.get_physical_device_format_properties(self.physical_device, preferred_format) };
+    fn pick_output_storage_format(
+        &self,
+        preferred_format: vk::Format,
+    ) -> Result<vk::Format, AppError> {
+        let swapchain_props = unsafe {
+            self.instance
+                .get_physical_device_format_properties(self.physical_device, preferred_format)
+        };
         let swapchain_can_blit_dst = swapchain_props
             .optimal_tiling_features
             .contains(vk::FormatFeatureFlags::BLIT_DST);
@@ -1241,8 +1323,10 @@ impl Renderer {
         }
 
         let float_output = vk::Format::R32G32B32A32_SFLOAT;
-        let props =
-            unsafe { self.instance.get_physical_device_format_properties(self.physical_device, float_output) };
+        let props = unsafe {
+            self.instance
+                .get_physical_device_format_properties(self.physical_device, float_output)
+        };
         if swapchain_can_blit_dst
             && props
                 .optimal_tiling_features
@@ -1261,7 +1345,10 @@ impl Renderer {
             unsafe { self.device.destroy_semaphore(semaphore, None) };
         }
         self.render_finished = (0..count)
-            .map(|_| unsafe { self.device.create_semaphore(&vk::SemaphoreCreateInfo::default(), None) })
+            .map(|_| unsafe {
+                self.device
+                    .create_semaphore(&vk::SemaphoreCreateInfo::default(), None)
+            })
             .collect::<Result<Vec<_>, _>>()?;
         Ok(())
     }
@@ -1290,10 +1377,11 @@ impl Renderer {
             )?
         };
         let device_address = unsafe {
-            self.acceleration_loader.get_acceleration_structure_device_address(
-                &vk::AccelerationStructureDeviceAddressInfoKHR::default()
-                    .acceleration_structure(handle),
-            )
+            self.acceleration_loader
+                .get_acceleration_structure_device_address(
+                    &vk::AccelerationStructureDeviceAddressInfoKHR::default()
+                        .acceleration_structure(handle),
+                )
         };
 
         Ok(AccelerationStructureResource {
@@ -1331,7 +1419,8 @@ impl Renderer {
             })
             .map_err(|error| AppError::Message(error.to_string()))?;
         unsafe {
-            self.device.bind_buffer_memory(buffer, allocation.memory(), allocation.offset())?;
+            self.device
+                .bind_buffer_memory(buffer, allocation.memory(), allocation.offset())?;
         }
 
         Ok(AllocatedBuffer {
@@ -1343,9 +1432,8 @@ impl Renderer {
 
     fn buffer_device_address(&self, buffer: vk::Buffer) -> vk::DeviceAddress {
         unsafe {
-            self.device.get_buffer_device_address(
-                &vk::BufferDeviceAddressInfo::default().buffer(buffer),
-            )
+            self.device
+                .get_buffer_device_address(&vk::BufferDeviceAddressInfo::default().buffer(buffer))
         }
     }
 
@@ -1369,13 +1457,13 @@ impl Renderer {
             self.device.end_command_buffer(self.command_buffer)?;
             let command_buffers = [self.command_buffer];
             let submit_info = vk::SubmitInfo::default().command_buffers(&command_buffers);
-            self.device.queue_submit(self.graphics_queue, &[submit_info], vk::Fence::null())?;
+            self.device
+                .queue_submit(self.graphics_queue, &[submit_info], vk::Fence::null())?;
             self.device.queue_wait_idle(self.graphics_queue)?;
         }
 
         Ok(())
     }
-
 }
 
 impl Drop for Renderer {
@@ -1387,12 +1475,16 @@ impl Drop for Renderer {
                 self.device.destroy_pipeline(self.pipeline, None);
             }
             if self.pipeline_layout != vk::PipelineLayout::null() {
-                self.device.destroy_pipeline_layout(self.pipeline_layout, None);
+                self.device
+                    .destroy_pipeline_layout(self.pipeline_layout, None);
             }
         }
         let _ = destroy_buffer_with(&self.device, &mut self.allocator, &mut self.sbt.buffer);
         if self.descriptor_pool != vk::DescriptorPool::null() {
-            unsafe { self.device.destroy_descriptor_pool(self.descriptor_pool, None) };
+            unsafe {
+                self.device
+                    .destroy_descriptor_pool(self.descriptor_pool, None)
+            };
         }
         if self.descriptor_set_layout != vk::DescriptorSetLayout::null() {
             unsafe {
@@ -1403,16 +1495,12 @@ impl Drop for Renderer {
 
         unsafe {
             if self.scene_acceleration.blas.handle != vk::AccelerationStructureKHR::null() {
-                self.acceleration_loader.destroy_acceleration_structure(
-                    self.scene_acceleration.blas.handle,
-                    None,
-                );
+                self.acceleration_loader
+                    .destroy_acceleration_structure(self.scene_acceleration.blas.handle, None);
             }
             if self.scene_acceleration.tlas.handle != vk::AccelerationStructureKHR::null() {
-                self.acceleration_loader.destroy_acceleration_structure(
-                    self.scene_acceleration.tlas.handle,
-                    None,
-                );
+                self.acceleration_loader
+                    .destroy_acceleration_structure(self.scene_acceleration.tlas.handle, None);
             }
         }
         let _ = destroy_buffer_with(
@@ -1438,10 +1526,14 @@ impl Drop for Renderer {
 
         let _ = destroy_buffer_with(&self.device, &mut self.allocator, &mut self.uniform_buffer);
         let _ = destroy_buffer_with(&self.device, &mut self.allocator, &mut self.object_buffer);
+        let _ = destroy_buffer_with(&self.device, &mut self.allocator, &mut self.voxel_buffer);
         let _ = destroy_image_with(&self.device, &mut self.allocator, &mut self.output_image);
 
         if self.swapchain != vk::SwapchainKHR::null() {
-            unsafe { self.swapchain_loader.destroy_swapchain(self.swapchain, None) };
+            unsafe {
+                self.swapchain_loader
+                    .destroy_swapchain(self.swapchain, None)
+            };
         }
 
         unsafe {
@@ -1520,14 +1612,15 @@ fn pick_physical_device(
 
     let mut candidates = physical_devices
         .into_iter()
-        .filter_map(|device| score_physical_device(instance, surface_loader, surface, device).transpose())
+        .filter_map(|device| {
+            score_physical_device(instance, surface_loader, surface, device).transpose()
+        })
         .collect::<Result<Vec<_>, _>>()?;
 
     candidates.sort_by_key(|(score, _)| *score);
-    candidates
-        .pop()
-        .map(|(_, device)| device)
-        .ok_or_else(|| AppError::Message("No Vulkan physical device with ray tracing support found".to_string()))
+    candidates.pop().map(|(_, device)| device).ok_or_else(|| {
+        AppError::Message("No Vulkan physical device with ray tracing support found".to_string())
+    })
 }
 
 fn score_physical_device(
@@ -1568,7 +1661,8 @@ fn pick_queue_family(
     physical_device: vk::PhysicalDevice,
     surface: vk::SurfaceKHR,
 ) -> Result<u32, AppError> {
-    let queue_families = unsafe { instance.get_physical_device_queue_family_properties(physical_device) };
+    let queue_families =
+        unsafe { instance.get_physical_device_queue_family_properties(physical_device) };
     for (index, family) in queue_families.into_iter().enumerate() {
         let supports_present = unsafe {
             surface_loader.get_physical_device_surface_support(

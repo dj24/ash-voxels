@@ -7,7 +7,11 @@ use bevy_ecs::{
 use glam::Vec3;
 use winit::keyboard::KeyCode;
 
-use crate::scene::{Camera, ExtractedScene, RenderObjectData, SceneUniform, VoxelProceduralObject};
+use crate::assets::VoxelModel;
+use crate::scene::{
+    Camera, ExtractedScene, RenderObjectData, SceneUniform, VoxelProceduralObject,
+    sphere_grid_positions,
+};
 
 #[derive(SystemSet, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum AppSet {
@@ -73,7 +77,7 @@ impl InputState {
     }
 }
 
-pub fn create_world(initial_size: [u32; 2]) -> World {
+pub fn create_world(initial_size: [u32; 2], model: &VoxelModel) -> World {
     let mut world = World::new();
     world.insert_resource(FrameTiming::default());
     world.insert_resource(WindowSize {
@@ -84,7 +88,10 @@ pub fn create_world(initial_size: [u32; 2]) -> World {
     world.insert_resource(ExtractedScene::default());
 
     world.spawn(Camera::default());
-    world.spawn(VoxelProceduralObject::default());
+    let object_template = VoxelProceduralObject::from(model);
+    for _ in sphere_grid_positions() {
+        world.spawn(object_template);
+    }
 
     world
 }
@@ -92,13 +99,10 @@ pub fn create_world(initial_size: [u32; 2]) -> World {
 pub fn create_schedule() -> Schedule {
     let mut schedule = Schedule::default();
     schedule.configure_sets((AppSet::Input, AppSet::Update, AppSet::Extract).chain());
-    schedule.add_systems(
-        (
-            animate_object.in_set(AppSet::Update),
-            update_camera.in_set(AppSet::Update),
-            extract_scene.in_set(AppSet::Extract),
-        ),
-    );
+    schedule.add_systems((
+        update_camera.in_set(AppSet::Update),
+        extract_scene.in_set(AppSet::Extract),
+    ));
     schedule
 }
 
@@ -121,11 +125,7 @@ pub fn begin_frame(world: &mut World, now: Instant, width: u32, height: u32) {
     window_size.height = height;
 }
 
-fn update_camera(
-    input: Res<InputState>,
-    timing: Res<FrameTiming>,
-    mut query: Query<&mut Camera>,
-) {
+fn update_camera(input: Res<InputState>, timing: Res<FrameTiming>, mut query: Query<&mut Camera>) {
     let mut camera = query.single_mut().expect("single camera");
     let basis = camera.basis();
     let movement_speed = 2.5;
@@ -158,16 +158,8 @@ fn update_camera(
     let yaw_delta = (input.turn_left as i32 - input.turn_right as i32) as f32;
     let pitch_delta = (input.look_down as i32 - input.look_up as i32) as f32;
     camera.yaw += -yaw_delta * look_speed * timing.delta_seconds;
-    camera.pitch = (camera.pitch + pitch_delta * look_speed * timing.delta_seconds).clamp(-1.3, 1.3);
-}
-
-fn animate_object(timing: Res<FrameTiming>, mut query: Query<&mut VoxelProceduralObject>) {
-    let mut object = query.single_mut().expect("single object");
-    object.sphere_center = Vec3::new(
-        (timing.elapsed_seconds * 0.65).sin() * 0.15,
-        (timing.elapsed_seconds * 0.9).cos() * 0.1,
-        0.0,
-    );
+    camera.pitch =
+        (camera.pitch + pitch_delta * look_speed * timing.delta_seconds).clamp(-1.3, 1.3);
 }
 
 fn extract_scene(
