@@ -1470,66 +1470,42 @@ impl Renderer {
             vk::AccessFlags::TRANSFER_WRITE,
         );
 
-        if self.output_image.format == self.swapchain_format.format {
-            unsafe {
-                self.device.cmd_copy_image(
-                    self.command_buffer,
-                    self.output_image.image,
-                    vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-                    self.swapchain_images[image_index],
-                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                    &[vk::ImageCopy::default()
-                        .src_subresource(
-                            vk::ImageSubresourceLayers::default()
-                                .aspect_mask(vk::ImageAspectFlags::COLOR)
-                                .layer_count(1),
-                        )
-                        .dst_subresource(
-                            vk::ImageSubresourceLayers::default()
-                                .aspect_mask(vk::ImageAspectFlags::COLOR)
-                                .layer_count(1),
-                        )
-                        .extent(self.extent.into())],
-                );
-            }
-        } else {
-            unsafe {
-                self.device.cmd_blit_image(
-                    self.command_buffer,
-                    self.output_image.image,
-                    vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-                    self.swapchain_images[image_index],
-                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                    &[vk::ImageBlit::default()
-                        .src_subresource(
-                            vk::ImageSubresourceLayers::default()
-                                .aspect_mask(vk::ImageAspectFlags::COLOR)
-                                .layer_count(1),
-                        )
-                        .src_offsets([
-                            vk::Offset3D { x: 0, y: 0, z: 0 },
-                            vk::Offset3D {
-                                x: self.extent.width as i32,
-                                y: self.extent.height as i32,
-                                z: 1,
-                            },
-                        ])
-                        .dst_subresource(
-                            vk::ImageSubresourceLayers::default()
-                                .aspect_mask(vk::ImageAspectFlags::COLOR)
-                                .layer_count(1),
-                        )
-                        .dst_offsets([
-                            vk::Offset3D { x: 0, y: 0, z: 0 },
-                            vk::Offset3D {
-                                x: self.extent.width as i32,
-                                y: self.extent.height as i32,
-                                z: 1,
-                            },
-                        ])],
-                    vk::Filter::NEAREST,
-                );
-            }
+        unsafe {
+            self.device.cmd_blit_image(
+                self.command_buffer,
+                self.output_image.image,
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                self.swapchain_images[image_index],
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                &[vk::ImageBlit::default()
+                    .src_subresource(
+                        vk::ImageSubresourceLayers::default()
+                            .aspect_mask(vk::ImageAspectFlags::COLOR)
+                            .layer_count(1),
+                    )
+                    .src_offsets([
+                        vk::Offset3D { x: 0, y: 0, z: 0 },
+                        vk::Offset3D {
+                            x: self.extent.width as i32,
+                            y: self.extent.height as i32,
+                            z: 1,
+                        },
+                    ])
+                    .dst_subresource(
+                        vk::ImageSubresourceLayers::default()
+                            .aspect_mask(vk::ImageAspectFlags::COLOR)
+                            .layer_count(1),
+                    )
+                    .dst_offsets([
+                        vk::Offset3D { x: 0, y: 0, z: 0 },
+                        vk::Offset3D {
+                            x: self.extent.width as i32,
+                            y: self.extent.height as i32,
+                            z: 1,
+                        },
+                    ])],
+                vk::Filter::NEAREST,
+            );
         }
 
         transition_image(
