@@ -38,6 +38,16 @@ const SHADERS: &[ShaderSpec<'_>] = &[
         entry_point: "terrain_gen_main",
         profile: "cs_6_3",
     },
+    ShaderSpec {
+        file_name: "coarse_depth_prepass.hlsl",
+        entry_point: "coarse_depth_prepass_main",
+        profile: "vs_6_3",
+    },
+    ShaderSpec {
+        file_name: "coarse_depth_debug.hlsl",
+        entry_point: "coarse_depth_debug_main",
+        profile: "cs_6_3",
+    },
 ];
 
 fn main() {

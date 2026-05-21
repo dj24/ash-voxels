@@ -22,7 +22,7 @@ use tracing::{info, warn};
 use crate::{
     assets::VoxelModel,
     scene::{ExtractedScene, RenderObjectData, VoxelProceduralObject},
-    shader_build::{compiled_shader_artifact, compiled_shader_artifacts},
+    shader_build::compiled_shader_artifact,
     terrain::{self, TERRAIN_GRID_COUNT, terrain_grid_positions},
     vk::AppError,
 };
@@ -52,6 +52,7 @@ const HEADLESS_DEVICE_EXTENSIONS: &[&CStr] = &[
 ];
 const HEADLESS_CAPTURE_FORMAT: vk::Format = vk::Format::R8G8B8A8_UNORM;
 const HEADLESS_OUTPUT_FORMAT: vk::Format = vk::Format::R32G32B32A32_SFLOAT;
+const COARSE_DEPTH_DIVISOR: u32 = 4;
 
 #[derive(Clone, Debug, Resource)]
 pub struct RenderDeviceCaps {
@@ -84,22 +85,31 @@ pub struct Renderer {
     render_finished: Vec<vk::Semaphore>,
     in_flight: vk::Fence,
     output_image: AllocatedImage,
+    coarse_depth_image: AllocatedImage,
     capture_image: AllocatedImage,
     readback_buffer: AllocatedBuffer,
     uniform_buffer: AllocatedBuffer,
     object_buffer: AllocatedBuffer,
     voxel_buffer: AllocatedBuffer,
+    coarse_depth_extent: vk::Extent2D,
+    coarse_depth_format: vk::Format,
+    coarse_depth_sampler: vk::Sampler,
     descriptor_pool: vk::DescriptorPool,
     descriptor_set_layout: vk::DescriptorSetLayout,
     descriptor_set: vk::DescriptorSet,
     pipeline_layout: vk::PipelineLayout,
     pipeline: vk::Pipeline,
+    coarse_depth_render_pass: vk::RenderPass,
+    coarse_depth_framebuffer: vk::Framebuffer,
+    coarse_depth_pipeline: vk::Pipeline,
+    coarse_depth_debug_pipeline: vk::Pipeline,
     sbt: ShaderBindingTable,
     acceleration_loader: ash::khr::acceleration_structure::Device,
     ray_tracing_pipeline_loader: ash::khr::ray_tracing_pipeline::Device,
     scene_acceleration: SceneAcceleration,
     device_caps: RenderDeviceCaps,
     mode: RendererMode,
+    active_object_count: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -393,22 +403,31 @@ impl Renderer {
             render_finished: Vec::new(),
             in_flight,
             output_image: AllocatedImage::default(),
+            coarse_depth_image: AllocatedImage::default(),
             capture_image: AllocatedImage::default(),
             readback_buffer: AllocatedBuffer::default(),
             uniform_buffer: AllocatedBuffer::default(),
             object_buffer: AllocatedBuffer::default(),
             voxel_buffer: AllocatedBuffer::default(),
+            coarse_depth_extent: vk::Extent2D::default(),
+            coarse_depth_format: vk::Format::UNDEFINED,
+            coarse_depth_sampler: vk::Sampler::null(),
             descriptor_pool: vk::DescriptorPool::null(),
             descriptor_set_layout: vk::DescriptorSetLayout::null(),
             descriptor_set: vk::DescriptorSet::null(),
             pipeline_layout: vk::PipelineLayout::null(),
             pipeline: vk::Pipeline::null(),
+            coarse_depth_render_pass: vk::RenderPass::null(),
+            coarse_depth_framebuffer: vk::Framebuffer::null(),
+            coarse_depth_pipeline: vk::Pipeline::null(),
+            coarse_depth_debug_pipeline: vk::Pipeline::null(),
             sbt: ShaderBindingTable::default(),
             acceleration_loader,
             ray_tracing_pipeline_loader,
             scene_acceleration: SceneAcceleration::default(),
             device_caps,
             mode,
+            active_object_count: 0,
         };
 
         match renderer.mode {
@@ -427,6 +446,8 @@ impl Renderer {
             }
         }
         renderer.create_descriptor_resources()?;
+        renderer.create_coarse_depth_shared_resources()?;
+        renderer.recreate_coarse_depth_targets()?;
         renderer.uniform_buffer = renderer.create_buffer(
             "scene uniform",
             size_of::<crate::scene::SceneUniform>() as u64,
@@ -480,6 +501,7 @@ impl Renderer {
 
         self.wait_idle()?;
         self.recreate_swapchain(width, height)?;
+        self.recreate_coarse_depth_targets()?;
         self.update_descriptor_set()?;
         Ok(())
     }
@@ -777,7 +799,7 @@ impl Renderer {
                 .binding(0)
                 .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
                 .descriptor_count(1)
-                .stage_flags(vk::ShaderStageFlags::RAYGEN_KHR),
+                .stage_flags(vk::ShaderStageFlags::RAYGEN_KHR | vk::ShaderStageFlags::COMPUTE),
             vk::DescriptorSetLayoutBinding::default()
                 .binding(1)
                 .descriptor_type(vk::DescriptorType::ACCELERATION_STRUCTURE_KHR)
@@ -787,15 +809,16 @@ impl Renderer {
                 .binding(2)
                 .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
                 .descriptor_count(1)
-                .stage_flags(vk::ShaderStageFlags::RAYGEN_KHR),
+                .stage_flags(vk::ShaderStageFlags::RAYGEN_KHR | vk::ShaderStageFlags::VERTEX),
             vk::DescriptorSetLayoutBinding::default()
                 .binding(3)
                 .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
                 .descriptor_count(1)
                 .stage_flags(
-                    vk::ShaderStageFlags::INTERSECTION_KHR
-                        | vk::ShaderStageFlags::CLOSEST_HIT_KHR
-                        | vk::ShaderStageFlags::COMPUTE,
+                    vk::ShaderStageFlags::VERTEX
+                        | vk::ShaderStageFlags::COMPUTE
+                        | vk::ShaderStageFlags::INTERSECTION_KHR
+                        | vk::ShaderStageFlags::CLOSEST_HIT_KHR,
                 ),
             vk::DescriptorSetLayoutBinding::default()
                 .binding(4)
@@ -806,6 +829,16 @@ impl Renderer {
                         | vk::ShaderStageFlags::CLOSEST_HIT_KHR
                         | vk::ShaderStageFlags::COMPUTE,
                 ),
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(5)
+                .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::COMPUTE),
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(6)
+                .descriptor_type(vk::DescriptorType::SAMPLER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::COMPUTE),
         ];
 
         self.descriptor_set_layout = unsafe {
@@ -831,6 +864,14 @@ impl Renderer {
             vk::DescriptorPoolSize {
                 ty: vk::DescriptorType::STORAGE_BUFFER,
                 descriptor_count: 2,
+            },
+            vk::DescriptorPoolSize {
+                ty: vk::DescriptorType::SAMPLED_IMAGE,
+                descriptor_count: 1,
+            },
+            vk::DescriptorPoolSize {
+                ty: vk::DescriptorType::SAMPLER,
+                descriptor_count: 1,
             },
         ];
 
@@ -1079,25 +1120,24 @@ impl Renderer {
     }
 
     fn create_pipeline_and_sbt(&mut self) -> Result<(), AppError> {
-        let artifact_paths = compiled_shader_artifacts();
         let stage_defs = [
             (
-                artifact_paths[0].clone(),
+                compiled_shader_artifact("raygen.spv"),
                 c"raygen_main",
                 vk::ShaderStageFlags::RAYGEN_KHR,
             ),
             (
-                artifact_paths[1].clone(),
+                compiled_shader_artifact("miss.spv"),
                 c"miss_main",
                 vk::ShaderStageFlags::MISS_KHR,
             ),
             (
-                artifact_paths[2].clone(),
+                compiled_shader_artifact("closesthit.spv"),
                 c"closest_hit_main",
                 vk::ShaderStageFlags::CLOSEST_HIT_KHR,
             ),
             (
-                artifact_paths[3].clone(),
+                compiled_shader_artifact("intersection.spv"),
                 c"intersection_main",
                 vk::ShaderStageFlags::INTERSECTION_KHR,
             ),
@@ -1327,6 +1367,11 @@ impl Renderer {
         let image_info = [vk::DescriptorImageInfo::default()
             .image_layout(vk::ImageLayout::GENERAL)
             .image_view(self.output_image.view)];
+        let coarse_depth_info = [vk::DescriptorImageInfo::default()
+            .image_layout(vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL)
+            .image_view(self.coarse_depth_image.view)];
+        let coarse_depth_sampler_info =
+            [vk::DescriptorImageInfo::default().sampler(self.coarse_depth_sampler)];
         let uniform_info = [vk::DescriptorBufferInfo::default()
             .buffer(self.uniform_buffer.buffer)
             .offset(0)
@@ -1370,6 +1415,16 @@ impl Renderer {
                 .dst_binding(4)
                 .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
                 .buffer_info(&voxel_info),
+            vk::WriteDescriptorSet::default()
+                .dst_set(self.descriptor_set)
+                .dst_binding(5)
+                .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                .image_info(&coarse_depth_info),
+            vk::WriteDescriptorSet::default()
+                .dst_set(self.descriptor_set)
+                .dst_binding(6)
+                .descriptor_type(vk::DescriptorType::SAMPLER)
+                .image_info(&coarse_depth_sampler_info),
         ];
 
         unsafe { self.device.update_descriptor_sets(&writes, &[]) };
@@ -1395,46 +1450,165 @@ impl Renderer {
             &mut self.object_buffer,
             bytemuck::cast_slice(&scene.objects[..scene.objects.len()]),
         )?;
+        self.active_object_count = scene.objects.len() as u32;
 
         Ok(())
     }
 
-    fn record_render_to_output_commands(&self) {
+    fn record_render_to_output_commands(&mut self) {
+        self.record_coarse_depth_prepass_commands();
+        self.record_coarse_depth_debug_commands();
+    }
+
+    fn record_coarse_depth_prepass_commands(&mut self) {
+        let (src_stage, src_access) = match self.coarse_depth_image.layout {
+            vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL => (
+                vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS
+                    | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS,
+                vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
+            ),
+            vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL => (
+                vk::PipelineStageFlags::COMPUTE_SHADER,
+                vk::AccessFlags::SHADER_READ,
+            ),
+            _ => (
+                vk::PipelineStageFlags::TOP_OF_PIPE,
+                vk::AccessFlags::empty(),
+            ),
+        };
+
+        transition_image(
+            &self.device,
+            self.command_buffer,
+            self.coarse_depth_image.image,
+            self.coarse_depth_image.layout,
+            vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+            src_stage,
+            vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS
+                | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS,
+            src_access,
+            vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
+            vk::ImageAspectFlags::DEPTH,
+        );
+        self.coarse_depth_image.layout = vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
+        let viewport = vk::Viewport::default()
+            .x(0.0)
+            .y(0.0)
+            .width(self.coarse_depth_extent.width as f32)
+            .height(self.coarse_depth_extent.height as f32)
+            .min_depth(0.0)
+            .max_depth(1.0);
+        let scissor = vk::Rect2D::default().extent(self.coarse_depth_extent);
+        let clear_values = [vk::ClearValue {
+            depth_stencil: vk::ClearDepthStencilValue {
+                depth: 1.0,
+                stencil: 0,
+            },
+        }];
+
+        unsafe {
+            self.device.cmd_begin_render_pass(
+                self.command_buffer,
+                &vk::RenderPassBeginInfo::default()
+                    .render_pass(self.coarse_depth_render_pass)
+                    .framebuffer(self.coarse_depth_framebuffer)
+                    .render_area(vk::Rect2D::default().extent(self.coarse_depth_extent))
+                    .clear_values(&clear_values),
+                vk::SubpassContents::INLINE,
+            );
+            self.device.cmd_bind_pipeline(
+                self.command_buffer,
+                vk::PipelineBindPoint::GRAPHICS,
+                self.coarse_depth_pipeline,
+            );
+            self.device.cmd_bind_descriptor_sets(
+                self.command_buffer,
+                vk::PipelineBindPoint::GRAPHICS,
+                self.pipeline_layout,
+                0,
+                &[self.descriptor_set],
+                &[],
+            );
+            self.device
+                .cmd_set_viewport(self.command_buffer, 0, &[viewport]);
+            self.device
+                .cmd_set_scissor(self.command_buffer, 0, &[scissor]);
+            self.device
+                .cmd_draw(self.command_buffer, 36, self.active_object_count, 0, 0);
+            self.device.cmd_end_render_pass(self.command_buffer);
+        }
+
+        transition_image(
+            &self.device,
+            self.command_buffer,
+            self.coarse_depth_image.image,
+            vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+            vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+            vk::PipelineStageFlags::LATE_FRAGMENT_TESTS,
+            vk::PipelineStageFlags::COMPUTE_SHADER,
+            vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
+            vk::AccessFlags::SHADER_READ,
+            vk::ImageAspectFlags::DEPTH,
+        );
+        self.coarse_depth_image.layout = vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+    }
+
+    fn record_coarse_depth_debug_commands(&mut self) {
+        let (src_stage, src_access) = match self.output_image.layout {
+            vk::ImageLayout::GENERAL => (
+                vk::PipelineStageFlags::COMPUTE_SHADER,
+                vk::AccessFlags::SHADER_WRITE,
+            ),
+            vk::ImageLayout::TRANSFER_SRC_OPTIMAL => (
+                vk::PipelineStageFlags::TRANSFER,
+                vk::AccessFlags::TRANSFER_READ,
+            ),
+            _ => (
+                vk::PipelineStageFlags::TOP_OF_PIPE,
+                vk::AccessFlags::empty(),
+            ),
+        };
+
         transition_image(
             &self.device,
             self.command_buffer,
             self.output_image.image,
             self.output_image.layout,
             vk::ImageLayout::GENERAL,
-            vk::PipelineStageFlags::TRANSFER,
-            vk::PipelineStageFlags::RAY_TRACING_SHADER_KHR,
-            vk::AccessFlags::TRANSFER_READ,
+            src_stage,
+            vk::PipelineStageFlags::COMPUTE_SHADER,
+            src_access,
             vk::AccessFlags::SHADER_WRITE,
+            vk::ImageAspectFlags::COLOR,
         );
+        self.output_image.layout = vk::ImageLayout::GENERAL;
+
+        let group_counts = [
+            self.extent.width.div_ceil(8),
+            self.extent.height.div_ceil(8),
+            1,
+        ];
 
         unsafe {
             self.device.cmd_bind_pipeline(
                 self.command_buffer,
-                vk::PipelineBindPoint::RAY_TRACING_KHR,
-                self.pipeline,
+                vk::PipelineBindPoint::COMPUTE,
+                self.coarse_depth_debug_pipeline,
             );
             self.device.cmd_bind_descriptor_sets(
                 self.command_buffer,
-                vk::PipelineBindPoint::RAY_TRACING_KHR,
+                vk::PipelineBindPoint::COMPUTE,
                 self.pipeline_layout,
                 0,
                 &[self.descriptor_set],
                 &[],
             );
-            self.ray_tracing_pipeline_loader.cmd_trace_rays(
+            self.device.cmd_dispatch(
                 self.command_buffer,
-                &self.sbt.raygen_region,
-                &self.sbt.miss_region,
-                &self.sbt.hit_region,
-                &vk::StridedDeviceAddressRegionKHR::default(),
-                self.extent.width,
-                self.extent.height,
-                1,
+                group_counts[0],
+                group_counts[1],
+                group_counts[2],
             );
         }
 
@@ -1444,11 +1618,13 @@ impl Renderer {
             self.output_image.image,
             vk::ImageLayout::GENERAL,
             vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-            vk::PipelineStageFlags::RAY_TRACING_SHADER_KHR,
+            vk::PipelineStageFlags::COMPUTE_SHADER,
             vk::PipelineStageFlags::TRANSFER,
             vk::AccessFlags::SHADER_WRITE,
             vk::AccessFlags::TRANSFER_READ,
+            vk::ImageAspectFlags::COLOR,
         );
+        self.output_image.layout = vk::ImageLayout::TRANSFER_SRC_OPTIMAL;
     }
 
     fn record_present_commands(&mut self, image_index: usize) -> Result<(), AppError> {
@@ -1468,6 +1644,7 @@ impl Renderer {
             vk::PipelineStageFlags::TRANSFER,
             vk::AccessFlags::empty(),
             vk::AccessFlags::TRANSFER_WRITE,
+            vk::ImageAspectFlags::COLOR,
         );
 
         unsafe {
@@ -1518,9 +1695,259 @@ impl Renderer {
             vk::PipelineStageFlags::BOTTOM_OF_PIPE,
             vk::AccessFlags::TRANSFER_WRITE,
             vk::AccessFlags::empty(),
+            vk::ImageAspectFlags::COLOR,
         );
 
         Ok(())
+    }
+
+    fn create_coarse_depth_shared_resources(&mut self) -> Result<(), AppError> {
+        self.coarse_depth_format = self.pick_coarse_depth_format()?;
+        self.coarse_depth_sampler = unsafe {
+            self.device.create_sampler(
+                &vk::SamplerCreateInfo::default()
+                    .mag_filter(vk::Filter::NEAREST)
+                    .min_filter(vk::Filter::NEAREST)
+                    .mipmap_mode(vk::SamplerMipmapMode::NEAREST)
+                    .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+                    .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+                    .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+                    .min_lod(0.0)
+                    .max_lod(0.0),
+                None,
+            )?
+        };
+        self.coarse_depth_render_pass = self.create_coarse_depth_render_pass()?;
+        self.coarse_depth_pipeline = self.create_coarse_depth_pipeline()?;
+        self.coarse_depth_debug_pipeline =
+            self.create_compute_pipeline("coarse_depth_debug.spv", c"coarse_depth_debug_main")?;
+
+        Ok(())
+    }
+
+    fn recreate_coarse_depth_targets(&mut self) -> Result<(), AppError> {
+        if self.coarse_depth_framebuffer != vk::Framebuffer::null() {
+            unsafe {
+                self.device
+                    .destroy_framebuffer(self.coarse_depth_framebuffer, None)
+            };
+            self.coarse_depth_framebuffer = vk::Framebuffer::null();
+        }
+        destroy_image_with(
+            &self.device,
+            self.allocator
+                .as_mut()
+                .expect("renderer allocator should exist"),
+            &mut self.coarse_depth_image,
+        )?;
+
+        self.coarse_depth_extent = coarse_depth_extent(self.extent);
+        self.coarse_depth_image = self.create_depth_image(
+            self.coarse_depth_extent,
+            self.coarse_depth_format,
+            "coarse depth image",
+        )?;
+
+        self.coarse_depth_framebuffer = unsafe {
+            self.device.create_framebuffer(
+                &vk::FramebufferCreateInfo::default()
+                    .render_pass(self.coarse_depth_render_pass)
+                    .attachments(&[self.coarse_depth_image.view])
+                    .width(self.coarse_depth_extent.width)
+                    .height(self.coarse_depth_extent.height)
+                    .layers(1),
+                None,
+            )?
+        };
+
+        Ok(())
+    }
+
+    fn create_coarse_depth_render_pass(&self) -> Result<vk::RenderPass, AppError> {
+        let attachments = [vk::AttachmentDescription::default()
+            .format(self.coarse_depth_format)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .load_op(vk::AttachmentLoadOp::CLEAR)
+            .store_op(vk::AttachmentStoreOp::STORE)
+            .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
+            .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
+            .initial_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+            .final_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)];
+        let depth_attachment = vk::AttachmentReference::default()
+            .attachment(0)
+            .layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+        let subpasses = [vk::SubpassDescription::default()
+            .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
+            .depth_stencil_attachment(&depth_attachment)];
+
+        Ok(unsafe {
+            self.device.create_render_pass(
+                &vk::RenderPassCreateInfo::default()
+                    .attachments(&attachments)
+                    .subpasses(&subpasses),
+                None,
+            )?
+        })
+    }
+
+    fn create_coarse_depth_pipeline(&self) -> Result<vk::Pipeline, AppError> {
+        let shader_module =
+            self.create_shader_module(&compiled_shader_artifact("coarse_depth_prepass.spv"))?;
+        let stages = [vk::PipelineShaderStageCreateInfo::default()
+            .module(shader_module)
+            .name(c"coarse_depth_prepass_main")
+            .stage(vk::ShaderStageFlags::VERTEX)];
+        let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
+        let vertex_input_state = vk::PipelineVertexInputStateCreateInfo::default();
+        let input_assembly_state = vk::PipelineInputAssemblyStateCreateInfo::default()
+            .topology(vk::PrimitiveTopology::TRIANGLE_LIST);
+        let viewport_state = vk::PipelineViewportStateCreateInfo::default()
+            .viewport_count(1)
+            .scissor_count(1);
+        let rasterization_state = vk::PipelineRasterizationStateCreateInfo::default()
+            .polygon_mode(vk::PolygonMode::FILL)
+            .cull_mode(vk::CullModeFlags::NONE)
+            .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
+            .line_width(1.0);
+        let multisample_state = vk::PipelineMultisampleStateCreateInfo::default()
+            .rasterization_samples(vk::SampleCountFlags::TYPE_1);
+        let color_blend_state = vk::PipelineColorBlendStateCreateInfo::default();
+        let depth_stencil_state = vk::PipelineDepthStencilStateCreateInfo::default()
+            .depth_test_enable(true)
+            .depth_write_enable(true)
+            .depth_compare_op(vk::CompareOp::LESS);
+        let dynamic_state =
+            vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
+        let pipeline_info = vk::GraphicsPipelineCreateInfo::default()
+            .stages(&stages)
+            .vertex_input_state(&vertex_input_state)
+            .input_assembly_state(&input_assembly_state)
+            .viewport_state(&viewport_state)
+            .rasterization_state(&rasterization_state)
+            .multisample_state(&multisample_state)
+            .color_blend_state(&color_blend_state)
+            .depth_stencil_state(&depth_stencil_state)
+            .dynamic_state(&dynamic_state)
+            .layout(self.pipeline_layout)
+            .render_pass(self.coarse_depth_render_pass)
+            .subpass(0);
+
+        let pipeline = unsafe {
+            self.device
+                .create_graphics_pipelines(vk::PipelineCache::null(), &[pipeline_info], None)
+                .map_err(|(_, error)| error)?
+        }[0];
+
+        unsafe { self.device.destroy_shader_module(shader_module, None) };
+        Ok(pipeline)
+    }
+
+    fn create_compute_pipeline(
+        &self,
+        shader_artifact_name: &str,
+        entry_point: &CStr,
+    ) -> Result<vk::Pipeline, AppError> {
+        let shader_module =
+            self.create_shader_module(&compiled_shader_artifact(shader_artifact_name))?;
+        let stage = vk::PipelineShaderStageCreateInfo::default()
+            .module(shader_module)
+            .name(entry_point)
+            .stage(vk::ShaderStageFlags::COMPUTE);
+        let pipeline_info = vk::ComputePipelineCreateInfo::default()
+            .stage(stage)
+            .layout(self.pipeline_layout);
+
+        let pipeline = unsafe {
+            self.device
+                .create_compute_pipelines(vk::PipelineCache::null(), &[pipeline_info], None)
+                .map_err(|(_, error)| error)?
+        }[0];
+
+        unsafe { self.device.destroy_shader_module(shader_module, None) };
+        Ok(pipeline)
+    }
+
+    fn create_shader_module(&self, path: &Path) -> Result<vk::ShaderModule, AppError> {
+        let bytes = std::fs::read(path)?;
+        let code = read_spv(&mut Cursor::new(bytes))
+            .map_err(|error| AppError::Message(error.to_string()))?;
+
+        Ok(unsafe {
+            self.device
+                .create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&code), None)?
+        })
+    }
+
+    fn create_depth_image(
+        &mut self,
+        extent: vk::Extent2D,
+        format: vk::Format,
+        name: &str,
+    ) -> Result<AllocatedImage, AppError> {
+        let image = unsafe {
+            self.device.create_image(
+                &vk::ImageCreateInfo::default()
+                    .image_type(vk::ImageType::TYPE_2D)
+                    .format(format)
+                    .extent(vk::Extent3D {
+                        width: extent.width,
+                        height: extent.height,
+                        depth: 1,
+                    })
+                    .mip_levels(1)
+                    .array_layers(1)
+                    .samples(vk::SampleCountFlags::TYPE_1)
+                    .tiling(vk::ImageTiling::OPTIMAL)
+                    .usage(
+                        vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT
+                            | vk::ImageUsageFlags::SAMPLED,
+                    )
+                    .sharing_mode(vk::SharingMode::EXCLUSIVE)
+                    .initial_layout(vk::ImageLayout::UNDEFINED),
+                None,
+            )?
+        };
+        let requirements = unsafe { self.device.get_image_memory_requirements(image) };
+        let allocation = self
+            .allocator
+            .as_mut()
+            .expect("renderer allocator should exist")
+            .allocate(&AllocationCreateDesc {
+                name,
+                requirements,
+                location: MemoryLocation::GpuOnly,
+                linear: false,
+                allocation_scheme: AllocationScheme::GpuAllocatorManaged,
+            })
+            .map_err(|error| AppError::Message(error.to_string()))?;
+        unsafe {
+            self.device
+                .bind_image_memory(image, allocation.memory(), allocation.offset())?;
+        }
+
+        let view = unsafe {
+            self.device.create_image_view(
+                &vk::ImageViewCreateInfo::default()
+                    .image(image)
+                    .view_type(vk::ImageViewType::TYPE_2D)
+                    .format(format)
+                    .subresource_range(
+                        vk::ImageSubresourceRange::default()
+                            .aspect_mask(vk::ImageAspectFlags::DEPTH)
+                            .level_count(1)
+                            .layer_count(1),
+                    ),
+                None,
+            )?
+        };
+
+        Ok(AllocatedImage {
+            image,
+            view,
+            allocation: Some(allocation),
+            format,
+            layout: vk::ImageLayout::UNDEFINED,
+        })
     }
 
     fn create_storage_image(
@@ -1590,6 +2017,25 @@ impl Renderer {
             format,
             layout: vk::ImageLayout::UNDEFINED,
         })
+    }
+
+    fn pick_coarse_depth_format(&self) -> Result<vk::Format, AppError> {
+        for format in [vk::Format::D32_SFLOAT, vk::Format::D16_UNORM] {
+            let props = unsafe {
+                self.instance
+                    .get_physical_device_format_properties(self.physical_device, format)
+            };
+            if props.optimal_tiling_features.contains(
+                vk::FormatFeatureFlags::DEPTH_STENCIL_ATTACHMENT
+                    | vk::FormatFeatureFlags::SAMPLED_IMAGE,
+            ) {
+                return Ok(format);
+            }
+        }
+
+        Err(AppError::Message(
+            "could not find a sampled depth format for the coarse depth prepass".to_string(),
+        ))
     }
 
     fn pick_windowed_output_storage_format(
@@ -1739,6 +2185,7 @@ impl Renderer {
             vk::PipelineStageFlags::TRANSFER,
             vk::AccessFlags::TRANSFER_READ,
             vk::AccessFlags::TRANSFER_WRITE,
+            vk::ImageAspectFlags::COLOR,
         );
 
         unsafe {
@@ -1789,6 +2236,7 @@ impl Renderer {
             vk::PipelineStageFlags::TRANSFER,
             vk::AccessFlags::TRANSFER_WRITE,
             vk::AccessFlags::TRANSFER_READ,
+            vk::ImageAspectFlags::COLOR,
         );
 
         unsafe {
@@ -1956,8 +2404,27 @@ impl Drop for Renderer {
         let _ = self.wait_idle();
 
         unsafe {
+            if self.coarse_depth_debug_pipeline != vk::Pipeline::null() {
+                self.device
+                    .destroy_pipeline(self.coarse_depth_debug_pipeline, None);
+            }
+            if self.coarse_depth_pipeline != vk::Pipeline::null() {
+                self.device
+                    .destroy_pipeline(self.coarse_depth_pipeline, None);
+            }
             if self.pipeline != vk::Pipeline::null() {
                 self.device.destroy_pipeline(self.pipeline, None);
+            }
+            if self.coarse_depth_framebuffer != vk::Framebuffer::null() {
+                self.device
+                    .destroy_framebuffer(self.coarse_depth_framebuffer, None);
+            }
+            if self.coarse_depth_render_pass != vk::RenderPass::null() {
+                self.device
+                    .destroy_render_pass(self.coarse_depth_render_pass, None);
+            }
+            if self.coarse_depth_sampler != vk::Sampler::null() {
+                self.device.destroy_sampler(self.coarse_depth_sampler, None);
             }
             if self.pipeline_layout != vk::PipelineLayout::null() {
                 self.device
@@ -2043,6 +2510,13 @@ impl Drop for Renderer {
                 .as_mut()
                 .expect("renderer allocator should exist"),
             &mut self.voxel_buffer,
+        );
+        let _ = destroy_image_with(
+            &self.device,
+            self.allocator
+                .as_mut()
+                .expect("renderer allocator should exist"),
+            &mut self.coarse_depth_image,
         );
         let _ = destroy_image_with(
             &self.device,
@@ -2306,6 +2780,13 @@ fn read_bytes(buffer: &AllocatedBuffer, byte_len: usize) -> Result<Vec<u8>, AppE
     Ok(mapped[..byte_len].to_vec())
 }
 
+fn coarse_depth_extent(output_extent: vk::Extent2D) -> vk::Extent2D {
+    vk::Extent2D {
+        width: output_extent.width.div_ceil(COARSE_DEPTH_DIVISOR).max(1),
+        height: output_extent.height.div_ceil(COARSE_DEPTH_DIVISOR).max(1),
+    }
+}
+
 fn rgba_image_byte_len(extent: vk::Extent2D) -> Result<usize, AppError> {
     let width = usize::try_from(extent.width)
         .map_err(|_| AppError::Message("image width did not fit in usize".to_string()))?;
@@ -2391,6 +2872,7 @@ fn transition_image(
     dst_stage: vk::PipelineStageFlags,
     src_access: vk::AccessFlags,
     dst_access: vk::AccessFlags,
+    aspect_mask: vk::ImageAspectFlags,
 ) {
     unsafe {
         device.cmd_pipeline_barrier(
@@ -2408,7 +2890,7 @@ fn transition_image(
                 .image(image)
                 .subresource_range(
                     vk::ImageSubresourceRange::default()
-                        .aspect_mask(vk::ImageAspectFlags::COLOR)
+                        .aspect_mask(aspect_mask)
                         .level_count(1)
                         .layer_count(1),
                 )],
@@ -2449,7 +2931,7 @@ unsafe extern "system" fn debug_callback(
 mod tests {
     use ash::vk;
 
-    use super::rgba_image_byte_len;
+    use super::{coarse_depth_extent, rgba_image_byte_len};
 
     #[test]
     fn rgba_image_byte_len_matches_extent() {
@@ -2471,5 +2953,39 @@ mod tests {
         .expect_err("overflow should be reported");
 
         assert!(error.to_string().contains("overflowed"));
+    }
+
+    #[test]
+    fn coarse_depth_extent_rounds_up_by_quarters() {
+        assert_eq!(
+            coarse_depth_extent(vk::Extent2D {
+                width: 1280,
+                height: 720,
+            }),
+            vk::Extent2D {
+                width: 320,
+                height: 180,
+            }
+        );
+        assert_eq!(
+            coarse_depth_extent(vk::Extent2D {
+                width: 5,
+                height: 7,
+            }),
+            vk::Extent2D {
+                width: 2,
+                height: 2,
+            }
+        );
+        assert_eq!(
+            coarse_depth_extent(vk::Extent2D {
+                width: 0,
+                height: 0,
+            }),
+            vk::Extent2D {
+                width: 1,
+                height: 1
+            }
+        );
     }
 }

@@ -6,6 +6,8 @@ pub const SHADER_ARTIFACTS: &[&str] = &[
     "closesthit.spv",
     "intersection.spv",
     "terrain_gen.spv",
+    "coarse_depth_prepass.spv",
+    "coarse_depth_debug.spv",
 ];
 
 pub fn shader_output_dir() -> PathBuf {
