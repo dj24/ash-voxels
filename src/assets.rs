@@ -88,6 +88,14 @@ impl VoxelModel {
     pub fn extent(&self) -> Vec3 {
         self.bounds_max - self.bounds_min
     }
+
+    pub fn occupancy_size_bytes(&self) -> usize {
+        self.occupancy.len() * std::mem::size_of::<u32>()
+    }
+
+    pub fn occupancy_size_kib(&self) -> f32 {
+        self.occupancy_size_bytes() as f32 / 1024.0
+    }
 }
 
 fn flatten_len(dimensions: UVec3) -> usize {

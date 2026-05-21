@@ -5,6 +5,7 @@ use bevy_ecs::{
     schedule::{IntoScheduleConfigs, Schedule, SystemSet},
 };
 use glam::Vec3;
+use tracing::info;
 use winit::keyboard::KeyCode;
 
 use crate::assets::VoxelModel;
@@ -87,7 +88,17 @@ pub fn create_world(initial_size: [u32; 2], model: &VoxelModel) -> World {
 
     world.spawn(Camera::default());
     let object_template = VoxelProceduralObject::from(model);
-    for _ in terrain_grid_positions(object_template.extent()) {
+    let chunk_size_kib = model.occupancy_size_kib();
+    for (chunk_index, _) in terrain_grid_positions(object_template.extent())
+        .into_iter()
+        .enumerate()
+    {
+        info!(
+            "Generated chunk {}/{}: {:.2} KiB",
+            chunk_index + 1,
+            crate::terrain::TERRAIN_GRID_COUNT,
+            chunk_size_kib
+        );
         world.spawn(object_template);
     }
 
