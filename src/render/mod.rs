@@ -21,14 +21,14 @@ use tracing::{info, warn};
 use crate::{
     assets::VoxelModel,
     scene::{
-        ExtractedScene, RenderObjectData, SPHERE_GRID_COUNT, VoxelProceduralObject,
-        sphere_grid_positions,
+        ExtractedScene, RenderObjectData, TERRAIN_GRID_COUNT, VoxelProceduralObject,
+        terrain_grid_positions,
     },
-    shader_build::compiled_shader_artifacts,
+    shader_build::{compiled_shader_artifact, compiled_shader_artifacts},
     vk::AppError,
 };
 
-const MAX_OBJECTS: usize = SPHERE_GRID_COUNT;
+const MAX_OBJECTS: usize = TERRAIN_GRID_COUNT;
 const VALIDATION_LAYER: &CStr = c"VK_LAYER_KHRONOS_validation";
 const DEVICE_EXTENSIONS: &[&CStr] = &[
     ash::khr::swapchain::NAME,
@@ -337,19 +337,22 @@ impl Renderer {
             vk::BufferUsageFlags::STORAGE_BUFFER,
             MemoryLocation::CpuToGpu,
         )?;
+        let object_template = RenderObjectData::from(VoxelProceduralObject::from(model));
+        let initial_objects = vec![object_template; MAX_OBJECTS];
+        write_bytes(
+            &mut renderer.object_buffer,
+            bytemuck::cast_slice(&initial_objects),
+        )?;
         renderer.voxel_buffer = renderer.create_buffer(
             "voxel occupancy",
-            (size_of::<u32>() * model.occupancy.len()) as u64,
+            (size_of::<u32>() * model.occupancy.len() * MAX_OBJECTS) as u64,
             vk::BufferUsageFlags::STORAGE_BUFFER,
             MemoryLocation::CpuToGpu,
         )?;
-        write_bytes(
-            &mut renderer.voxel_buffer,
-            bytemuck::cast_slice(&model.occupancy),
-        )?;
         renderer.scene_acceleration = renderer.create_scene_acceleration(model)?;
-        renderer.create_pipeline_and_sbt()?;
         renderer.update_descriptor_set()?;
+        renderer.populate_voxel_buffer(model)?;
+        renderer.create_pipeline_and_sbt()?;
 
         info!(
             "Selected device {} (max recursion depth {}, shader group handle size {})",
@@ -582,14 +585,18 @@ impl Renderer {
                 .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
                 .descriptor_count(1)
                 .stage_flags(
-                    vk::ShaderStageFlags::INTERSECTION_KHR | vk::ShaderStageFlags::CLOSEST_HIT_KHR,
+                    vk::ShaderStageFlags::INTERSECTION_KHR
+                        | vk::ShaderStageFlags::CLOSEST_HIT_KHR
+                        | vk::ShaderStageFlags::COMPUTE,
                 ),
             vk::DescriptorSetLayoutBinding::default()
                 .binding(4)
                 .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
                 .descriptor_count(1)
                 .stage_flags(
-                    vk::ShaderStageFlags::INTERSECTION_KHR | vk::ShaderStageFlags::CLOSEST_HIT_KHR,
+                    vk::ShaderStageFlags::INTERSECTION_KHR
+                        | vk::ShaderStageFlags::CLOSEST_HIT_KHR
+                        | vk::ShaderStageFlags::COMPUTE,
                 ),
         ];
 
@@ -650,7 +657,7 @@ impl Renderer {
         model: &VoxelModel,
     ) -> Result<SceneAcceleration, AppError> {
         let object = VoxelProceduralObject::from(model);
-        let instance_positions = sphere_grid_positions();
+        let instance_positions = terrain_grid_positions(object.extent());
         let aabb = vk::AabbPositionsKHR {
             min_x: object.bounds_min.x,
             min_y: object.bounds_min.y,
@@ -940,6 +947,89 @@ impl Renderer {
         }
 
         self.sbt = self.create_shader_binding_table(groups.len() as u32)?;
+
+        Ok(())
+    }
+
+    fn populate_voxel_buffer(&mut self, model: &VoxelModel) -> Result<(), AppError> {
+        if model.occupancy.iter().any(|value| *value != 0) {
+            let mut repeated = Vec::with_capacity(model.occupancy.len() * MAX_OBJECTS);
+            for _ in 0..MAX_OBJECTS {
+                repeated.extend_from_slice(&model.occupancy);
+            }
+            write_bytes(&mut self.voxel_buffer, bytemuck::cast_slice(&repeated))?;
+            return Ok(());
+        }
+
+        self.generate_terrain_voxels(model)
+    }
+
+    fn generate_terrain_voxels(&mut self, model: &VoxelModel) -> Result<(), AppError> {
+        let shader_path = compiled_shader_artifact("terrain_gen.spv");
+        let bytes = std::fs::read(&shader_path)?;
+        let code = read_spv(&mut Cursor::new(bytes))
+            .map_err(|error| AppError::Message(error.to_string()))?;
+        let shader_module = unsafe {
+            self.device
+                .create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&code), None)?
+        };
+
+        let stage = vk::PipelineShaderStageCreateInfo::default()
+            .module(shader_module)
+            .name(c"terrain_gen_main")
+            .stage(vk::ShaderStageFlags::COMPUTE);
+        let pipeline_info = vk::ComputePipelineCreateInfo::default()
+            .stage(stage)
+            .layout(self.pipeline_layout);
+
+        let pipeline = unsafe {
+            self.device
+                .create_compute_pipelines(vk::PipelineCache::null(), &[pipeline_info], None)
+                .map_err(|(_, error)| error)?
+        }[0];
+
+        let group_count_x = model.dimensions.x.div_ceil(8);
+        let group_count_y = model.dimensions.y.div_ceil(4);
+        let total_depth = model.dimensions.z * MAX_OBJECTS as u32;
+        let group_count_z = total_depth.div_ceil(8);
+
+        self.immediate_submit(|renderer, command_buffer| unsafe {
+            renderer.device.cmd_bind_pipeline(
+                command_buffer,
+                vk::PipelineBindPoint::COMPUTE,
+                pipeline,
+            );
+            renderer.device.cmd_bind_descriptor_sets(
+                command_buffer,
+                vk::PipelineBindPoint::COMPUTE,
+                renderer.pipeline_layout,
+                0,
+                &[renderer.descriptor_set],
+                &[],
+            );
+            renderer.device.cmd_dispatch(
+                command_buffer,
+                group_count_x,
+                group_count_y,
+                group_count_z,
+            );
+            renderer.device.cmd_pipeline_barrier(
+                command_buffer,
+                vk::PipelineStageFlags::COMPUTE_SHADER,
+                vk::PipelineStageFlags::RAY_TRACING_SHADER_KHR,
+                vk::DependencyFlags::empty(),
+                &[vk::MemoryBarrier::default()
+                    .src_access_mask(vk::AccessFlags::SHADER_WRITE)
+                    .dst_access_mask(vk::AccessFlags::SHADER_READ)],
+                &[],
+                &[],
+            );
+        })?;
+
+        unsafe {
+            self.device.destroy_pipeline(pipeline, None);
+            self.device.destroy_shader_module(shader_module, None);
+        }
 
         Ok(())
     }

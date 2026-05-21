@@ -6,11 +6,38 @@ use std::{
     process::Command,
 };
 
-const SHADERS: &[(&str, &str)] = &[
-    ("raygen.hlsl", "raygen_main"),
-    ("miss.hlsl", "miss_main"),
-    ("closesthit.hlsl", "closest_hit_main"),
-    ("intersection.hlsl", "intersection_main"),
+struct ShaderSpec<'a> {
+    file_name: &'a str,
+    entry_point: &'a str,
+    profile: &'a str,
+}
+
+const SHADERS: &[ShaderSpec<'_>] = &[
+    ShaderSpec {
+        file_name: "raygen.hlsl",
+        entry_point: "raygen_main",
+        profile: "lib_6_3",
+    },
+    ShaderSpec {
+        file_name: "miss.hlsl",
+        entry_point: "miss_main",
+        profile: "lib_6_3",
+    },
+    ShaderSpec {
+        file_name: "closesthit.hlsl",
+        entry_point: "closest_hit_main",
+        profile: "lib_6_3",
+    },
+    ShaderSpec {
+        file_name: "intersection.hlsl",
+        entry_point: "intersection_main",
+        profile: "lib_6_3",
+    },
+    ShaderSpec {
+        file_name: "terrain_gen.hlsl",
+        entry_point: "terrain_gen_main",
+        profile: "cs_6_3",
+    },
 ];
 
 fn main() {
@@ -25,17 +52,17 @@ fn main() {
     let dxc =
         find_dxc().expect("Unable to find dxc.exe. Install the Vulkan SDK or add dxc to PATH.");
 
-    for (file_name, entry_point) in SHADERS {
-        let source = shader_dir.join(file_name);
-        let output = out_dir.join(Path::new(file_name).with_extension("spv"));
+    for shader in SHADERS {
+        let source = shader_dir.join(shader.file_name);
+        let output = out_dir.join(Path::new(shader.file_name).with_extension("spv"));
 
         let status = Command::new(&dxc)
             .args([
                 OsStr::new("-spirv"),
                 OsStr::new("-T"),
-                OsStr::new("lib_6_3"),
+                OsStr::new(shader.profile),
                 OsStr::new("-E"),
-                OsStr::new(entry_point),
+                OsStr::new(shader.entry_point),
                 OsStr::new("-fspv-target-env=vulkan1.3"),
                 OsStr::new("-I"),
                 shader_dir.as_os_str(),

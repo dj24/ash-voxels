@@ -5,14 +5,20 @@ uint flatten_index(uint3 position, uint3 dimensions)
     return position.x + dimensions.x * (position.y + dimensions.y * position.z);
 }
 
-float occupancy_at(int3 position, uint3 dimensions)
+uint object_voxel_offset(uint instance_id, uint3 dimensions)
+{
+    return instance_id * (dimensions.x * dimensions.y * dimensions.z);
+}
+
+float occupancy_at(int3 position, uint3 dimensions, uint instance_id)
 {
     if (any(position < 0) || any(position >= int3(dimensions)))
     {
         return 0.0f;
     }
 
-    return voxel_occupancy[flatten_index(uint3(position), dimensions)] == 0u ? 0.0f : 1.0f;
+    uint offset = object_voxel_offset(instance_id, dimensions);
+    return voxel_occupancy[offset + flatten_index(uint3(position), dimensions)] == 0u ? 0.0f : 1.0f;
 }
 
 float3 fallback_normal(float3 direction, int last_axis, int3 step_dir)
@@ -66,6 +72,7 @@ void intersection_main()
         max(1, (int)object.voxel_size_and_dimensions.y),
         max(1, (int)object.voxel_size_and_dimensions.z),
         max(1, (int)object.voxel_size_and_dimensions.w));
+    uint instance_id = InstanceID();
 
     float3 origin = ObjectRayOrigin();
     float3 direction = ObjectRayDirection();
@@ -103,12 +110,12 @@ void intersection_main()
             return;
         }
 
-        if (occupancy_at(cell, grid_dims) > 0.5f)
+        if (occupancy_at(cell, grid_dims, instance_id) > 0.5f)
         {
             float3 gradient = float3(
-                occupancy_at(cell + int3(-1, 0, 0), grid_dims) - occupancy_at(cell + int3(1, 0, 0), grid_dims),
-                occupancy_at(cell + int3(0, -1, 0), grid_dims) - occupancy_at(cell + int3(0, 1, 0), grid_dims),
-                occupancy_at(cell + int3(0, 0, -1), grid_dims) - occupancy_at(cell + int3(0, 0, 1), grid_dims));
+                occupancy_at(cell + int3(-1, 0, 0), grid_dims, instance_id) - occupancy_at(cell + int3(1, 0, 0), grid_dims, instance_id),
+                occupancy_at(cell + int3(0, -1, 0), grid_dims, instance_id) - occupancy_at(cell + int3(0, 1, 0), grid_dims, instance_id),
+                occupancy_at(cell + int3(0, 0, -1), grid_dims, instance_id) - occupancy_at(cell + int3(0, 0, 1), grid_dims, instance_id));
 
             HitAttributes attr;
             attr.normal = length(gradient) > 1e-5f

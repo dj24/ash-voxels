@@ -10,7 +10,7 @@ use winit::keyboard::KeyCode;
 use crate::assets::VoxelModel;
 use crate::scene::{
     Camera, ExtractedScene, RenderObjectData, SceneUniform, VoxelProceduralObject,
-    sphere_grid_positions,
+    terrain_grid_positions,
 };
 
 #[derive(SystemSet, Clone, Debug, PartialEq, Eq, Hash)]
@@ -89,7 +89,7 @@ pub fn create_world(initial_size: [u32; 2], model: &VoxelModel) -> World {
 
     world.spawn(Camera::default());
     let object_template = VoxelProceduralObject::from(model);
-    for _ in sphere_grid_positions() {
+    for _ in terrain_grid_positions(object_template.extent()) {
         world.spawn(object_template);
     }
 
@@ -128,7 +128,7 @@ pub fn begin_frame(world: &mut World, now: Instant, width: u32, height: u32) {
 fn update_camera(input: Res<InputState>, timing: Res<FrameTiming>, mut query: Query<&mut Camera>) {
     let mut camera = query.single_mut().expect("single camera");
     let basis = camera.basis();
-    let movement_speed = 2.5;
+    let movement_speed = 18.0;
     let look_speed = 1.2;
 
     let mut movement = Vec3::ZERO;

@@ -51,7 +51,7 @@ impl AppState {
             .map_err(|error| AppError::Message(error.to_string()))?;
 
         let initial_size = window.inner_size();
-        let voxel_model = VoxelModel::load_dragon()?;
+        let voxel_model = VoxelModel::procedural_terrain_chunk();
         let mut world = ecs::create_world([initial_size.width, initial_size.height], &voxel_model);
         let schedule = ecs::create_schedule();
 

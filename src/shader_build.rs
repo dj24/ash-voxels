@@ -5,15 +5,20 @@ pub const SHADER_ARTIFACTS: &[&str] = &[
     "miss.spv",
     "closesthit.spv",
     "intersection.spv",
+    "terrain_gen.spv",
 ];
 
 pub fn shader_output_dir() -> PathBuf {
     PathBuf::from(env!("OUT_DIR")).join("shaders")
 }
 
+pub fn compiled_shader_artifact(name: &str) -> PathBuf {
+    shader_output_dir().join(name)
+}
+
 pub fn compiled_shader_artifacts() -> Vec<PathBuf> {
     SHADER_ARTIFACTS
         .iter()
-        .map(|artifact| shader_output_dir().join(artifact))
+        .map(|artifact| compiled_shader_artifact(artifact))
         .collect()
 }
