@@ -38,6 +38,8 @@ int2 terrain_tile_coordinates(uint chunk_index)
     return int2(chunk_index % TERRAIN_GRID_SIDE, chunk_index / TERRAIN_GRID_SIDE);
 }
 
+static const float FREQUENCY_MULTIPLIER = 0.5;
+
 float terrain_surface_height(int2 position, uint3 dimensions, uint chunk_index)
 {
     int2 tile = terrain_tile_coordinates(chunk_index);
@@ -52,7 +54,7 @@ float terrain_surface_height(int2 position, uint3 dimensions, uint chunk_index)
     float sample_y = world_position.y;
 
     fnl_state warp = fnlCreateState(1337);
-    warp.frequency = 0.005f;
+    warp.frequency = 0.005f * FREQUENCY_MULTIPLIER;
     warp.fractal_type = FNL_FRACTAL_DOMAIN_WARP_PROGRESSIVE;
     warp.octaves = 3;
     warp.lacunarity = 2.0f;
@@ -62,7 +64,7 @@ float terrain_surface_height(int2 position, uint3 dimensions, uint chunk_index)
 
     fnl_state broad_shape = fnlCreateState(4242);
     broad_shape.noise_type = FNL_NOISE_OPENSIMPLEX2;
-    broad_shape.frequency = 0.003f;
+    broad_shape.frequency = 0.003f * FREQUENCY_MULTIPLIER;
     broad_shape.fractal_type = FNL_FRACTAL_FBM;
     broad_shape.octaves = 5;
     broad_shape.lacunarity = 2.0f;
@@ -70,7 +72,7 @@ float terrain_surface_height(int2 position, uint3 dimensions, uint chunk_index)
 
     fnl_state detail_shape = fnlCreateState(9001);
     detail_shape.noise_type = FNL_NOISE_OPENSIMPLEX2;
-    detail_shape.frequency = 0.01f;
+    detail_shape.frequency = 0.01f * FREQUENCY_MULTIPLIER;
     detail_shape.fractal_type = FNL_FRACTAL_FBM;
     detail_shape.octaves = 3;
     detail_shape.lacunarity = 2.3f;
