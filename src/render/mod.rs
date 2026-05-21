@@ -3,6 +3,7 @@ use std::{
     ffi::{CStr, CString, c_void},
     io::Cursor,
     mem::{align_of, size_of},
+    path::Path,
 };
 
 use ash::{
@@ -30,7 +31,7 @@ use crate::{
 
 const MAX_OBJECTS: usize = TERRAIN_GRID_COUNT;
 const VALIDATION_LAYER: &CStr = c"VK_LAYER_KHRONOS_validation";
-const DEVICE_EXTENSIONS: &[&CStr] = &[
+const WINDOWED_DEVICE_EXTENSIONS: &[&CStr] = &[
     ash::khr::swapchain::NAME,
     ash::khr::acceleration_structure::NAME,
     ash::khr::ray_tracing_pipeline::NAME,
@@ -41,6 +42,18 @@ const DEVICE_EXTENSIONS: &[&CStr] = &[
     ash::khr::spirv_1_4::NAME,
     ash::khr::shader_float_controls::NAME,
 ];
+const HEADLESS_DEVICE_EXTENSIONS: &[&CStr] = &[
+    ash::khr::acceleration_structure::NAME,
+    ash::khr::ray_tracing_pipeline::NAME,
+    ash::khr::ray_query::NAME,
+    ash::khr::deferred_host_operations::NAME,
+    ash::khr::buffer_device_address::NAME,
+    ash::ext::descriptor_indexing::NAME,
+    ash::khr::spirv_1_4::NAME,
+    ash::khr::shader_float_controls::NAME,
+];
+const HEADLESS_CAPTURE_FORMAT: vk::Format = vk::Format::R8G8B8A8_UNORM;
+const HEADLESS_OUTPUT_FORMAT: vk::Format = vk::Format::R32G32B32A32_SFLOAT;
 
 #[derive(Clone, Debug, Resource)]
 pub struct RenderDeviceCaps {
@@ -55,24 +68,26 @@ pub struct Renderer {
     instance: Instance,
     debug_utils: Option<ash::ext::debug_utils::Instance>,
     debug_messenger: Option<vk::DebugUtilsMessengerEXT>,
-    surface_loader: ash::khr::surface::Instance,
+    surface_loader: Option<ash::khr::surface::Instance>,
     surface: vk::SurfaceKHR,
     physical_device: vk::PhysicalDevice,
     device: Device,
     graphics_queue: vk::Queue,
-    swapchain_loader: ash::khr::swapchain::Device,
+    swapchain_loader: Option<ash::khr::swapchain::Device>,
     swapchain: vk::SwapchainKHR,
     swapchain_images: Vec<vk::Image>,
     swapchain_initialized: Vec<bool>,
     swapchain_format: vk::SurfaceFormatKHR,
     extent: vk::Extent2D,
-    allocator: Allocator,
+    allocator: Option<Allocator>,
     command_pool: vk::CommandPool,
     command_buffer: vk::CommandBuffer,
     image_available: vk::Semaphore,
     render_finished: Vec<vk::Semaphore>,
     in_flight: vk::Fence,
     output_image: AllocatedImage,
+    capture_image: AllocatedImage,
+    readback_buffer: AllocatedBuffer,
     uniform_buffer: AllocatedBuffer,
     object_buffer: AllocatedBuffer,
     voxel_buffer: AllocatedBuffer,
@@ -86,6 +101,13 @@ pub struct Renderer {
     ray_tracing_pipeline_loader: ash::khr::ray_tracing_pipeline::Device,
     scene_acceleration: SceneAcceleration,
     device_caps: RenderDeviceCaps,
+    mode: RendererMode,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RendererMode {
+    Windowed,
+    Headless,
 }
 
 impl Renderer {
@@ -93,6 +115,24 @@ impl Renderer {
         _window: &winit::window::Window,
         display_handle: RawDisplayHandle,
         window_handle: RawWindowHandle,
+        initial_size: [u32; 2],
+        model: &VoxelModel,
+    ) -> Result<Self, AppError> {
+        Self::new_internal(
+            RendererMode::Windowed,
+            Some((display_handle, window_handle)),
+            initial_size,
+            model,
+        )
+    }
+
+    pub fn new_headless(initial_size: [u32; 2], model: &VoxelModel) -> Result<Self, AppError> {
+        Self::new_internal(RendererMode::Headless, None, initial_size, model)
+    }
+
+    fn new_internal(
+        mode: RendererMode,
+        window_handles: Option<(RawDisplayHandle, RawWindowHandle)>,
         initial_size: [u32; 2],
         model: &VoxelModel,
     ) -> Result<Self, AppError> {
@@ -105,8 +145,12 @@ impl Renderer {
                 CStr::from_ptr(layer.layer_name.as_ptr()) == VALIDATION_LAYER
             });
 
-        let mut extension_names =
-            ash_window::enumerate_required_extensions(display_handle)?.to_vec();
+        let mut extension_names = match window_handles {
+            Some((display_handle, _)) => {
+                ash_window::enumerate_required_extensions(display_handle)?.to_vec()
+            }
+            None => Vec::new(),
+        };
         if enable_validation {
             extension_names.push(ash::ext::debug_utils::NAME.as_ptr());
         }
@@ -152,17 +196,54 @@ impl Renderer {
             })
             .transpose()?;
 
-        let surface = unsafe {
-            ash_window::create_surface(&entry, &instance, display_handle, window_handle, None)?
+        let (surface_loader, surface) = match window_handles {
+            Some((display_handle, window_handle)) => {
+                let surface_loader = ash::khr::surface::Instance::new(&entry, &instance);
+                let surface = unsafe {
+                    ash_window::create_surface(
+                        &entry,
+                        &instance,
+                        display_handle,
+                        window_handle,
+                        None,
+                    )?
+                };
+                (Some(surface_loader), surface)
+            }
+            None => (None, vk::SurfaceKHR::null()),
         };
-        let surface_loader = ash::khr::surface::Instance::new(&entry, &instance);
 
-        let physical_device = pick_physical_device(&instance, &surface_loader, surface)?;
-        let queue_family_index =
-            pick_queue_family(&instance, &surface_loader, physical_device, surface)?;
+        let physical_device = match mode {
+            RendererMode::Windowed => pick_physical_device(
+                &instance,
+                surface_loader
+                    .as_ref()
+                    .expect("windowed renderer should create a surface loader"),
+                surface,
+                WINDOWED_DEVICE_EXTENSIONS,
+            )?,
+            RendererMode::Headless => pick_headless_physical_device(&instance)?,
+        };
+        let queue_family_index = match mode {
+            RendererMode::Windowed => pick_queue_family(
+                &instance,
+                surface_loader
+                    .as_ref()
+                    .expect("windowed renderer should create a surface loader"),
+                physical_device,
+                surface,
+            )?,
+            RendererMode::Headless => pick_graphics_queue_family(&instance, physical_device)?,
+        };
 
-        let device_extensions: Vec<*const i8> =
-            DEVICE_EXTENSIONS.iter().map(|name| name.as_ptr()).collect();
+        let device_extension_names = match mode {
+            RendererMode::Windowed => WINDOWED_DEVICE_EXTENSIONS,
+            RendererMode::Headless => HEADLESS_DEVICE_EXTENSIONS,
+        };
+        let device_extensions: Vec<*const i8> = device_extension_names
+            .iter()
+            .map(|name| name.as_ptr())
+            .collect();
         let priorities = [1.0f32];
         let queue_info = [vk::DeviceQueueCreateInfo::default()
             .queue_family_index(queue_family_index)
@@ -224,7 +305,10 @@ impl Renderer {
         let device = unsafe { instance.create_device(physical_device, &device_info, None)? };
         let graphics_queue = unsafe { device.get_device_queue(queue_family_index, 0) };
 
-        let swapchain_loader = ash::khr::swapchain::Device::new(&instance, &device);
+        let swapchain_loader = match mode {
+            RendererMode::Windowed => Some(ash::khr::swapchain::Device::new(&instance, &device)),
+            RendererMode::Headless => None,
+        };
         let acceleration_loader = ash::khr::acceleration_structure::Device::new(&instance, &device);
         let ray_tracing_pipeline_loader =
             ash::khr::ray_tracing_pipeline::Device::new(&instance, &device);
@@ -273,8 +357,11 @@ impl Renderer {
         })
         .map_err(|error| AppError::Message(error.to_string()))?;
 
-        let image_available =
-            unsafe { device.create_semaphore(&vk::SemaphoreCreateInfo::default(), None)? };
+        let image_available = if mode == RendererMode::Windowed {
+            unsafe { device.create_semaphore(&vk::SemaphoreCreateInfo::default(), None)? }
+        } else {
+            vk::Semaphore::null()
+        };
         let in_flight = unsafe {
             device.create_fence(
                 &vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED),
@@ -301,13 +388,15 @@ impl Renderer {
                 width: initial_size[0].max(1),
                 height: initial_size[1].max(1),
             },
-            allocator,
+            allocator: Some(allocator),
             command_pool,
             command_buffer,
             image_available,
             render_finished: Vec::new(),
             in_flight,
             output_image: AllocatedImage::default(),
+            capture_image: AllocatedImage::default(),
+            readback_buffer: AllocatedBuffer::default(),
             uniform_buffer: AllocatedBuffer::default(),
             object_buffer: AllocatedBuffer::default(),
             voxel_buffer: AllocatedBuffer::default(),
@@ -321,9 +410,21 @@ impl Renderer {
             ray_tracing_pipeline_loader,
             scene_acceleration: SceneAcceleration::default(),
             device_caps,
+            mode,
         };
 
-        renderer.recreate_swapchain(initial_size[0], initial_size[1])?;
+        match renderer.mode {
+            RendererMode::Windowed => {
+                renderer.recreate_swapchain(initial_size[0], initial_size[1])?;
+            }
+            RendererMode::Headless => {
+                let storage_format = renderer.pick_headless_output_storage_format()?;
+                renderer.output_image =
+                    renderer.create_storage_image(renderer.extent, storage_format, "output image")?;
+                renderer.capture_image = renderer.create_capture_image(renderer.extent)?;
+                renderer.readback_buffer = renderer.create_readback_buffer(renderer.extent)?;
+            }
+        }
         renderer.create_descriptor_resources()?;
         renderer.uniform_buffer = renderer.create_buffer(
             "scene uniform",
@@ -369,6 +470,9 @@ impl Renderer {
     }
 
     pub fn handle_resize(&mut self, width: u32, height: u32) -> Result<(), AppError> {
+        if self.mode != RendererMode::Windowed {
+            return Ok(());
+        }
         if width == 0 || height == 0 {
             return Ok(());
         }
@@ -380,20 +484,24 @@ impl Renderer {
     }
 
     pub fn render(&mut self, scene: &ExtractedScene) -> Result<(), AppError> {
+        if self.mode != RendererMode::Windowed {
+            return Err(AppError::Message(
+                "windowed render path was used for a headless renderer".to_string(),
+            ));
+        }
         if self.extent.width == 0 || self.extent.height == 0 {
             return Ok(());
         }
 
         self.upload_scene(scene)?;
-
-        unsafe {
-            self.device
-                .wait_for_fences(&[self.in_flight], true, u64::MAX)?;
-            self.device.reset_fences(&[self.in_flight])?;
-        }
+        self.begin_frame_submission()?;
 
         let (image_index, suboptimal) = unsafe {
-            match self.swapchain_loader.acquire_next_image(
+            match self
+                .swapchain_loader
+                .as_ref()
+                .expect("windowed renderer should have a swapchain loader")
+                .acquire_next_image(
                 self.swapchain,
                 u64::MAX,
                 self.image_available,
@@ -418,7 +526,8 @@ impl Renderer {
             )?;
         }
 
-        self.record_frame_commands(image_index as usize)?;
+        self.record_render_to_output_commands();
+        self.record_present_commands(image_index as usize)?;
 
         unsafe {
             self.device.end_command_buffer(self.command_buffer)?;
@@ -446,6 +555,8 @@ impl Renderer {
 
             match self
                 .swapchain_loader
+                .as_ref()
+                .expect("windowed renderer should have a swapchain loader")
                 .queue_present(self.graphics_queue, &present_info)
             {
                 Ok(needs_resize) if needs_resize || suboptimal => {
@@ -467,23 +578,93 @@ impl Renderer {
         Ok(())
     }
 
+    pub fn render_headless(&mut self, scene: &ExtractedScene) -> Result<(), AppError> {
+        if self.mode != RendererMode::Headless {
+            return Err(AppError::Message(
+                "headless render path was used for a windowed renderer".to_string(),
+            ));
+        }
+        if self.extent.width == 0 || self.extent.height == 0 {
+            return Ok(());
+        }
+
+        self.upload_scene(scene)?;
+        self.begin_frame_submission()?;
+
+        unsafe {
+            self.device
+                .reset_command_pool(self.command_pool, vk::CommandPoolResetFlags::empty())?;
+            self.device.begin_command_buffer(
+                self.command_buffer,
+                &vk::CommandBufferBeginInfo::default(),
+            )?;
+        }
+
+        self.record_render_to_output_commands();
+
+        unsafe {
+            self.device.end_command_buffer(self.command_buffer)?;
+            let command_buffers = [self.command_buffer];
+            let submit_info = vk::SubmitInfo::default().command_buffers(&command_buffers);
+            self.device
+                .queue_submit(self.graphics_queue, &[submit_info], self.in_flight)?;
+        }
+
+        self.output_image.layout = vk::ImageLayout::TRANSFER_SRC_OPTIMAL;
+        Ok(())
+    }
+
+    pub fn save_headless_png(&mut self, path: &Path) -> Result<(), AppError> {
+        if self.mode != RendererMode::Headless {
+            return Err(AppError::Message(
+                "PNG capture is only available for a headless renderer".to_string(),
+            ));
+        }
+
+        self.wait_for_in_flight()?;
+        self.immediate_submit(|renderer, command_buffer| {
+            renderer.record_capture_commands(command_buffer);
+        })?;
+        self.capture_image.layout = vk::ImageLayout::TRANSFER_SRC_OPTIMAL;
+
+        let expected_len = rgba_image_byte_len(self.extent)?;
+        let bytes = read_bytes(&self.readback_buffer, expected_len)?;
+        write_png(path, self.extent, &bytes)
+    }
+
     pub fn wait_idle(&mut self) -> Result<(), AppError> {
         unsafe { self.device.device_wait_idle()? };
         Ok(())
     }
 
+    fn wait_for_in_flight(&self) -> Result<(), AppError> {
+        unsafe {
+            self.device.wait_for_fences(&[self.in_flight], true, u64::MAX)?;
+        }
+        Ok(())
+    }
+
+    fn begin_frame_submission(&self) -> Result<(), AppError> {
+        self.wait_for_in_flight()?;
+        unsafe {
+            self.device.reset_fences(&[self.in_flight])?;
+        }
+        Ok(())
+    }
+
     fn recreate_swapchain(&mut self, width: u32, height: u32) -> Result<(), AppError> {
+        let surface_loader = self
+            .surface_loader
+            .as_ref()
+            .expect("windowed renderer should have a surface loader");
         let capabilities = unsafe {
-            self.surface_loader
-                .get_physical_device_surface_capabilities(self.physical_device, self.surface)?
+            surface_loader.get_physical_device_surface_capabilities(self.physical_device, self.surface)?
         };
         let formats = unsafe {
-            self.surface_loader
-                .get_physical_device_surface_formats(self.physical_device, self.surface)?
+            surface_loader.get_physical_device_surface_formats(self.physical_device, self.surface)?
         };
         let present_modes = unsafe {
-            self.surface_loader
-                .get_physical_device_surface_present_modes(self.physical_device, self.surface)?
+            surface_loader.get_physical_device_surface_present_modes(self.physical_device, self.surface)?
         };
 
         let chosen_format = formats
@@ -541,17 +722,39 @@ impl Renderer {
             .clipped(true)
             .old_swapchain(self.swapchain);
 
-        let new_swapchain = unsafe { self.swapchain_loader.create_swapchain(&create_info, None)? };
-        let new_images = unsafe { self.swapchain_loader.get_swapchain_images(new_swapchain)? };
-        let output_image = self.create_output_image(self.extent, chosen_format.format)?;
+        let new_swapchain = unsafe {
+            self.swapchain_loader
+                .as_ref()
+                .expect("windowed renderer should have a swapchain loader")
+                .create_swapchain(&create_info, None)?
+        };
+        let new_images = unsafe {
+            self.swapchain_loader
+                .as_ref()
+                .expect("windowed renderer should have a swapchain loader")
+                .get_swapchain_images(new_swapchain)?
+        };
+        let output_image = self.create_storage_image(
+            self.extent,
+            self.pick_windowed_output_storage_format(chosen_format.format)?,
+            "output image",
+        )?;
 
         if self.swapchain != vk::SwapchainKHR::null() {
             unsafe {
                 self.swapchain_loader
+                    .as_ref()
+                    .expect("windowed renderer should have a swapchain loader")
                     .destroy_swapchain(self.swapchain, None)
             };
         }
-        destroy_image_with(&self.device, &mut self.allocator, &mut self.output_image)?;
+        destroy_image_with(
+            &self.device,
+            self.allocator
+                .as_mut()
+                .expect("renderer allocator should exist"),
+            &mut self.output_image,
+        )?;
 
         self.swapchain = new_swapchain;
         self.swapchain_images = new_images;
@@ -747,7 +950,13 @@ impl Renderer {
                     &[&blas_range],
                 );
         })?;
-        destroy_buffer_with(&self.device, &mut self.allocator, &mut blas_scratch)?;
+        destroy_buffer_with(
+            &self.device,
+            self.allocator
+                .as_mut()
+                .expect("renderer allocator should exist"),
+            &mut blas_scratch,
+        )?;
 
         let instances = instance_positions
             .iter()
@@ -848,7 +1057,13 @@ impl Renderer {
                     &[&tlas_range],
                 );
         })?;
-        destroy_buffer_with(&self.device, &mut self.allocator, &mut tlas_scratch)?;
+        destroy_buffer_with(
+            &self.device,
+            self.allocator
+                .as_mut()
+                .expect("renderer allocator should exist"),
+            &mut tlas_scratch,
+        )?;
 
         Ok(SceneAcceleration {
             aabb_buffer,
@@ -1172,36 +1387,17 @@ impl Renderer {
         Ok(())
     }
 
-    fn record_frame_commands(&mut self, image_index: usize) -> Result<(), AppError> {
-        let output_old_layout = self.output_image.layout;
-        let swapchain_old_layout = if self.swapchain_initialized[image_index] {
-            vk::ImageLayout::PRESENT_SRC_KHR
-        } else {
-            vk::ImageLayout::UNDEFINED
-        };
-
+    fn record_render_to_output_commands(&self) {
         transition_image(
             &self.device,
             self.command_buffer,
             self.output_image.image,
-            output_old_layout,
+            self.output_image.layout,
             vk::ImageLayout::GENERAL,
             vk::PipelineStageFlags::TRANSFER,
             vk::PipelineStageFlags::RAY_TRACING_SHADER_KHR,
             vk::AccessFlags::TRANSFER_READ,
             vk::AccessFlags::SHADER_WRITE,
-        );
-
-        transition_image(
-            &self.device,
-            self.command_buffer,
-            self.swapchain_images[image_index],
-            swapchain_old_layout,
-            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-            vk::PipelineStageFlags::TOP_OF_PIPE,
-            vk::PipelineStageFlags::TRANSFER,
-            vk::AccessFlags::empty(),
-            vk::AccessFlags::TRANSFER_WRITE,
         );
 
         unsafe {
@@ -1240,6 +1436,26 @@ impl Renderer {
             vk::PipelineStageFlags::TRANSFER,
             vk::AccessFlags::SHADER_WRITE,
             vk::AccessFlags::TRANSFER_READ,
+        );
+    }
+
+    fn record_present_commands(&mut self, image_index: usize) -> Result<(), AppError> {
+        let swapchain_old_layout = if self.swapchain_initialized[image_index] {
+            vk::ImageLayout::PRESENT_SRC_KHR
+        } else {
+            vk::ImageLayout::UNDEFINED
+        };
+
+        transition_image(
+            &self.device,
+            self.command_buffer,
+            self.swapchain_images[image_index],
+            swapchain_old_layout,
+            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+            vk::PipelineStageFlags::TOP_OF_PIPE,
+            vk::PipelineStageFlags::TRANSFER,
+            vk::AccessFlags::empty(),
+            vk::AccessFlags::TRANSFER_WRITE,
         );
 
         if self.output_image.format == self.swapchain_format.format {
@@ -1319,18 +1535,17 @@ impl Renderer {
         Ok(())
     }
 
-    fn create_output_image(
+    fn create_storage_image(
         &mut self,
         extent: vk::Extent2D,
         format: vk::Format,
+        name: &str,
     ) -> Result<AllocatedImage, AppError> {
-        let storage_format = self.pick_output_storage_format(format)?;
-
         let image = unsafe {
             self.device.create_image(
                 &vk::ImageCreateInfo::default()
                     .image_type(vk::ImageType::TYPE_2D)
-                    .format(storage_format)
+                    .format(format)
                     .extent(vk::Extent3D {
                         width: extent.width,
                         height: extent.height,
@@ -1349,8 +1564,10 @@ impl Renderer {
         let requirements = unsafe { self.device.get_image_memory_requirements(image) };
         let allocation = self
             .allocator
+            .as_mut()
+            .expect("renderer allocator should exist")
             .allocate(&AllocationCreateDesc {
-                name: "output image",
+                name,
                 requirements,
                 location: MemoryLocation::GpuOnly,
                 linear: false,
@@ -1367,7 +1584,7 @@ impl Renderer {
                 &vk::ImageViewCreateInfo::default()
                     .image(image)
                     .view_type(vk::ImageViewType::TYPE_2D)
-                    .format(storage_format)
+                    .format(format)
                     .subresource_range(
                         vk::ImageSubresourceRange::default()
                             .aspect_mask(vk::ImageAspectFlags::COLOR)
@@ -1382,12 +1599,12 @@ impl Renderer {
             image,
             view,
             allocation: Some(allocation),
-            format: storage_format,
+            format,
             layout: vk::ImageLayout::UNDEFINED,
         })
     }
 
-    fn pick_output_storage_format(
+    fn pick_windowed_output_storage_format(
         &self,
         preferred_format: vk::Format,
     ) -> Result<vk::Format, AppError> {
@@ -1412,7 +1629,7 @@ impl Renderer {
             }
         }
 
-        let float_output = vk::Format::R32G32B32A32_SFLOAT;
+        let float_output = HEADLESS_OUTPUT_FORMAT;
         let props = unsafe {
             self.instance
                 .get_physical_device_format_properties(self.physical_device, float_output)
@@ -1428,6 +1645,188 @@ impl Renderer {
         Err(AppError::Message(format!(
             "could not find an R32G32B32A32_SFLOAT storage output format compatible with swapchain format {preferred_format:?}"
         )))
+    }
+
+    fn pick_headless_output_storage_format(&self) -> Result<vk::Format, AppError> {
+        let props = unsafe {
+            self.instance
+                .get_physical_device_format_properties(self.physical_device, HEADLESS_OUTPUT_FORMAT)
+        };
+        if props.optimal_tiling_features.contains(
+            vk::FormatFeatureFlags::STORAGE_IMAGE | vk::FormatFeatureFlags::BLIT_SRC,
+        ) {
+            return Ok(HEADLESS_OUTPUT_FORMAT);
+        }
+
+        Err(AppError::Message(
+            "could not find an R32G32B32A32_SFLOAT storage output format for headless capture"
+                .to_string(),
+        ))
+    }
+
+    fn create_capture_image(&mut self, extent: vk::Extent2D) -> Result<AllocatedImage, AppError> {
+        let props = unsafe {
+            self.instance
+                .get_physical_device_format_properties(self.physical_device, HEADLESS_CAPTURE_FORMAT)
+        };
+        if !props
+            .optimal_tiling_features
+            .contains(vk::FormatFeatureFlags::BLIT_DST)
+        {
+            return Err(AppError::Message(
+                "R8G8B8A8_UNORM capture images do not support blit-destination usage".to_string(),
+            ));
+        }
+
+        let image = unsafe {
+            self.device.create_image(
+                &vk::ImageCreateInfo::default()
+                    .image_type(vk::ImageType::TYPE_2D)
+                    .format(HEADLESS_CAPTURE_FORMAT)
+                    .extent(vk::Extent3D {
+                        width: extent.width,
+                        height: extent.height,
+                        depth: 1,
+                    })
+                    .mip_levels(1)
+                    .array_layers(1)
+                    .samples(vk::SampleCountFlags::TYPE_1)
+                    .tiling(vk::ImageTiling::OPTIMAL)
+                    .usage(vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::TRANSFER_SRC)
+                    .sharing_mode(vk::SharingMode::EXCLUSIVE)
+                    .initial_layout(vk::ImageLayout::UNDEFINED),
+                None,
+            )?
+        };
+        let requirements = unsafe { self.device.get_image_memory_requirements(image) };
+        let allocation = self
+            .allocator
+            .as_mut()
+            .expect("renderer allocator should exist")
+            .allocate(&AllocationCreateDesc {
+                name: "capture image",
+                requirements,
+                location: MemoryLocation::GpuOnly,
+                linear: false,
+                allocation_scheme: AllocationScheme::GpuAllocatorManaged,
+            })
+            .map_err(|error| AppError::Message(error.to_string()))?;
+        unsafe {
+            self.device
+                .bind_image_memory(image, allocation.memory(), allocation.offset())?;
+        }
+
+        Ok(AllocatedImage {
+            image,
+            view: vk::ImageView::null(),
+            allocation: Some(allocation),
+            format: HEADLESS_CAPTURE_FORMAT,
+            layout: vk::ImageLayout::UNDEFINED,
+        })
+    }
+
+    fn create_readback_buffer(&mut self, extent: vk::Extent2D) -> Result<AllocatedBuffer, AppError> {
+        self.create_buffer(
+            "capture readback",
+            rgba_image_byte_len(extent)? as u64,
+            vk::BufferUsageFlags::TRANSFER_DST,
+            MemoryLocation::GpuToCpu,
+        )
+    }
+
+    fn record_capture_commands(&self, command_buffer: vk::CommandBuffer) {
+        transition_image(
+            &self.device,
+            command_buffer,
+            self.capture_image.image,
+            self.capture_image.layout,
+            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+            vk::PipelineStageFlags::TRANSFER,
+            vk::PipelineStageFlags::TRANSFER,
+            vk::AccessFlags::TRANSFER_READ,
+            vk::AccessFlags::TRANSFER_WRITE,
+        );
+
+        unsafe {
+            self.device.cmd_blit_image(
+                command_buffer,
+                self.output_image.image,
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                self.capture_image.image,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                &[vk::ImageBlit::default()
+                    .src_subresource(
+                        vk::ImageSubresourceLayers::default()
+                            .aspect_mask(vk::ImageAspectFlags::COLOR)
+                            .layer_count(1),
+                    )
+                    .src_offsets([
+                        vk::Offset3D { x: 0, y: 0, z: 0 },
+                        vk::Offset3D {
+                            x: self.extent.width as i32,
+                            y: self.extent.height as i32,
+                            z: 1,
+                        },
+                    ])
+                    .dst_subresource(
+                        vk::ImageSubresourceLayers::default()
+                            .aspect_mask(vk::ImageAspectFlags::COLOR)
+                            .layer_count(1),
+                    )
+                    .dst_offsets([
+                        vk::Offset3D { x: 0, y: 0, z: 0 },
+                        vk::Offset3D {
+                            x: self.extent.width as i32,
+                            y: self.extent.height as i32,
+                            z: 1,
+                        },
+                    ])],
+                vk::Filter::NEAREST,
+            );
+        }
+
+        transition_image(
+            &self.device,
+            command_buffer,
+            self.capture_image.image,
+            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+            vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+            vk::PipelineStageFlags::TRANSFER,
+            vk::PipelineStageFlags::TRANSFER,
+            vk::AccessFlags::TRANSFER_WRITE,
+            vk::AccessFlags::TRANSFER_READ,
+        );
+
+        unsafe {
+            self.device.cmd_copy_image_to_buffer(
+                command_buffer,
+                self.capture_image.image,
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                self.readback_buffer.buffer,
+                &[vk::BufferImageCopy::default()
+                    .buffer_offset(0)
+                    .image_subresource(
+                        vk::ImageSubresourceLayers::default()
+                            .aspect_mask(vk::ImageAspectFlags::COLOR)
+                            .layer_count(1),
+                    )
+                    .image_extent(self.extent.into())],
+            );
+            self.device.cmd_pipeline_barrier(
+                command_buffer,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::PipelineStageFlags::HOST,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[vk::BufferMemoryBarrier::default()
+                    .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                    .dst_access_mask(vk::AccessFlags::HOST_READ)
+                    .buffer(self.readback_buffer.buffer)
+                    .offset(0)
+                    .size(self.readback_buffer.size)],
+                &[],
+            );
+        }
     }
 
     fn recreate_render_finished_semaphores(&mut self, count: usize) -> Result<(), AppError> {
@@ -1500,6 +1899,8 @@ impl Renderer {
         let requirements = unsafe { self.device.get_buffer_memory_requirements(buffer) };
         let allocation = self
             .allocator
+            .as_mut()
+            .expect("renderer allocator should exist")
             .allocate(&AllocationCreateDesc {
                 name,
                 requirements,
@@ -1569,7 +1970,13 @@ impl Drop for Renderer {
                     .destroy_pipeline_layout(self.pipeline_layout, None);
             }
         }
-        let _ = destroy_buffer_with(&self.device, &mut self.allocator, &mut self.sbt.buffer);
+        let _ = destroy_buffer_with(
+            &self.device,
+            self.allocator
+                .as_mut()
+                .expect("renderer allocator should exist"),
+            &mut self.sbt.buffer,
+        );
         if self.descriptor_pool != vk::DescriptorPool::null() {
             unsafe {
                 self.device
@@ -1595,35 +2002,81 @@ impl Drop for Renderer {
         }
         let _ = destroy_buffer_with(
             &self.device,
-            &mut self.allocator,
+            self.allocator
+                .as_mut()
+                .expect("renderer allocator should exist"),
             &mut self.scene_acceleration.blas.buffer,
         );
         let _ = destroy_buffer_with(
             &self.device,
-            &mut self.allocator,
+            self.allocator
+                .as_mut()
+                .expect("renderer allocator should exist"),
             &mut self.scene_acceleration.tlas.buffer,
         );
         let _ = destroy_buffer_with(
             &self.device,
-            &mut self.allocator,
+            self.allocator
+                .as_mut()
+                .expect("renderer allocator should exist"),
             &mut self.scene_acceleration.aabb_buffer,
         );
         let _ = destroy_buffer_with(
             &self.device,
-            &mut self.allocator,
+            self.allocator
+                .as_mut()
+                .expect("renderer allocator should exist"),
             &mut self.scene_acceleration.instance_buffer,
         );
 
-        let _ = destroy_buffer_with(&self.device, &mut self.allocator, &mut self.uniform_buffer);
-        let _ = destroy_buffer_with(&self.device, &mut self.allocator, &mut self.object_buffer);
-        let _ = destroy_buffer_with(&self.device, &mut self.allocator, &mut self.voxel_buffer);
-        let _ = destroy_image_with(&self.device, &mut self.allocator, &mut self.output_image);
+        let _ = destroy_buffer_with(
+            &self.device,
+            self.allocator
+                .as_mut()
+                .expect("renderer allocator should exist"),
+            &mut self.uniform_buffer,
+        );
+        let _ = destroy_buffer_with(
+            &self.device,
+            self.allocator
+                .as_mut()
+                .expect("renderer allocator should exist"),
+            &mut self.object_buffer,
+        );
+        let _ = destroy_buffer_with(
+            &self.device,
+            self.allocator
+                .as_mut()
+                .expect("renderer allocator should exist"),
+            &mut self.voxel_buffer,
+        );
+        let _ = destroy_image_with(
+            &self.device,
+            self.allocator
+                .as_mut()
+                .expect("renderer allocator should exist"),
+            &mut self.output_image,
+        );
+        let _ = destroy_image_with(
+            &self.device,
+            self.allocator
+                .as_mut()
+                .expect("renderer allocator should exist"),
+            &mut self.capture_image,
+        );
+        let _ = destroy_buffer_with(
+            &self.device,
+            self.allocator
+                .as_mut()
+                .expect("renderer allocator should exist"),
+            &mut self.readback_buffer,
+        );
+        self.allocator.take();
 
         if self.swapchain != vk::SwapchainKHR::null() {
-            unsafe {
-                self.swapchain_loader
-                    .destroy_swapchain(self.swapchain, None)
-            };
+            if let Some(swapchain_loader) = &self.swapchain_loader {
+                unsafe { swapchain_loader.destroy_swapchain(self.swapchain, None) };
+            }
         }
 
         unsafe {
@@ -1642,8 +2095,10 @@ impl Drop for Renderer {
             self.device.destroy_device(None);
         }
 
-        unsafe {
-            self.surface_loader.destroy_surface(self.surface, None);
+        if let Some(surface_loader) = &self.surface_loader {
+            unsafe {
+                surface_loader.destroy_surface(self.surface, None);
+            }
         }
         if let (Some(loader), Some(messenger)) = (&self.debug_utils, self.debug_messenger) {
             unsafe { loader.destroy_debug_utils_messenger(messenger, None) };
@@ -1697,13 +2152,36 @@ fn pick_physical_device(
     instance: &Instance,
     surface_loader: &ash::khr::surface::Instance,
     surface: vk::SurfaceKHR,
+    required_extensions: &[&CStr],
 ) -> Result<vk::PhysicalDevice, AppError> {
     let physical_devices = unsafe { instance.enumerate_physical_devices()? };
 
     let mut candidates = physical_devices
         .into_iter()
         .filter_map(|device| {
-            score_physical_device(instance, surface_loader, surface, device).transpose()
+            score_physical_device(
+                instance,
+                Some((surface_loader, surface)),
+                device,
+                required_extensions,
+            )
+            .transpose()
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    candidates.sort_by_key(|(score, _)| *score);
+    candidates.pop().map(|(_, device)| device).ok_or_else(|| {
+        AppError::Message("No Vulkan physical device with ray tracing support found".to_string())
+    })
+}
+
+fn pick_headless_physical_device(instance: &Instance) -> Result<vk::PhysicalDevice, AppError> {
+    let physical_devices = unsafe { instance.enumerate_physical_devices()? };
+
+    let mut candidates = physical_devices
+        .into_iter()
+        .filter_map(|device| {
+            score_physical_device(instance, None, device, HEADLESS_DEVICE_EXTENSIONS).transpose()
         })
         .collect::<Result<Vec<_>, _>>()?;
 
@@ -1715,18 +2193,26 @@ fn pick_physical_device(
 
 fn score_physical_device(
     instance: &Instance,
-    surface_loader: &ash::khr::surface::Instance,
-    surface: vk::SurfaceKHR,
+    present_surface: Option<(&ash::khr::surface::Instance, vk::SurfaceKHR)>,
     physical_device: vk::PhysicalDevice,
+    required_extensions: &[&CStr],
 ) -> Result<Option<(u32, vk::PhysicalDevice)>, AppError> {
-    let queue_family = match pick_queue_family(instance, surface_loader, physical_device, surface) {
-        Ok(index) => index,
-        Err(_) => return Ok(None),
+    let queue_family = match present_surface {
+        Some((surface_loader, surface)) => {
+            match pick_queue_family(instance, surface_loader, physical_device, surface) {
+                Ok(index) => index,
+                Err(_) => return Ok(None),
+            }
+        }
+        None => match pick_graphics_queue_family(instance, physical_device) {
+            Ok(index) => index,
+            Err(_) => return Ok(None),
+        },
     };
 
     let extension_props =
         unsafe { instance.enumerate_device_extension_properties(physical_device)? };
-    for required in DEVICE_EXTENSIONS {
+    for required in required_extensions {
         let found = extension_props.iter().any(|extension| unsafe {
             CStr::from_ptr(extension.extension_name.as_ptr()) == *required
         });
@@ -1743,6 +2229,23 @@ fn score_physical_device(
     } + queue_family;
 
     Ok(Some((score, physical_device)))
+}
+
+fn pick_graphics_queue_family(
+    instance: &Instance,
+    physical_device: vk::PhysicalDevice,
+) -> Result<u32, AppError> {
+    let queue_families =
+        unsafe { instance.get_physical_device_queue_family_properties(physical_device) };
+    for (index, family) in queue_families.into_iter().enumerate() {
+        if family.queue_flags.contains(vk::QueueFlags::GRAPHICS) {
+            return Ok(index as u32);
+        }
+    }
+
+    Err(AppError::Message(
+        "No graphics queue family was found".to_string(),
+    ))
 }
 
 fn pick_queue_family(
@@ -1787,6 +2290,61 @@ fn write_bytes(buffer: &mut AllocatedBuffer, data: &[u8]) -> Result<(), AppError
         )));
     }
     mapped[..data.len()].copy_from_slice(data);
+    Ok(())
+}
+
+fn read_bytes(buffer: &AllocatedBuffer, byte_len: usize) -> Result<Vec<u8>, AppError> {
+    let allocation = buffer
+        .allocation
+        .as_ref()
+        .ok_or_else(|| AppError::Message("buffer allocation missing".to_string()))?;
+    let mapped = allocation
+        .mapped_slice()
+        .ok_or_else(|| AppError::Message("buffer is not host visible".to_string()))?;
+    if byte_len > mapped.len() {
+        return Err(AppError::Message(format!(
+            "buffer read overflow: {} > {}",
+            byte_len,
+            mapped.len()
+        )));
+    }
+
+    Ok(mapped[..byte_len].to_vec())
+}
+
+fn rgba_image_byte_len(extent: vk::Extent2D) -> Result<usize, AppError> {
+    let width = usize::try_from(extent.width)
+        .map_err(|_| AppError::Message("image width did not fit in usize".to_string()))?;
+    let height = usize::try_from(extent.height)
+        .map_err(|_| AppError::Message("image height did not fit in usize".to_string()))?;
+
+    width
+        .checked_mul(height)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or_else(|| AppError::Message("RGBA image byte size overflowed".to_string()))
+}
+
+fn write_png(path: &Path, extent: vk::Extent2D, rgba_bytes: &[u8]) -> Result<(), AppError> {
+    let expected_len = rgba_image_byte_len(extent)?;
+    if rgba_bytes.len() != expected_len {
+        return Err(AppError::Message(format!(
+            "PNG data length {} did not match expected RGBA byte length {}",
+            rgba_bytes.len(),
+            expected_len
+        )));
+    }
+
+    let file = std::fs::File::create(path)?;
+    let mut encoder = png::Encoder::new(file, extent.width, extent.height);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    let mut writer = encoder
+        .write_header()
+        .map_err(|error| AppError::Message(format!("failed to write PNG header: {error}")))?;
+    writer
+        .write_image_data(rgba_bytes)
+        .map_err(|error| AppError::Message(format!("failed to write PNG data: {error}")))?;
+
     Ok(())
 }
 
@@ -1891,4 +2449,33 @@ unsafe extern "system" fn debug_callback(
     }
 
     vk::FALSE
+}
+
+#[cfg(test)]
+mod tests {
+    use ash::vk;
+
+    use super::rgba_image_byte_len;
+
+    #[test]
+    fn rgba_image_byte_len_matches_extent() {
+        let byte_len = rgba_image_byte_len(vk::Extent2D {
+            width: 1280,
+            height: 720,
+        })
+        .expect("byte length should fit");
+
+        assert_eq!(byte_len, 1280 * 720 * 4);
+    }
+
+    #[test]
+    fn rgba_image_byte_len_detects_overflow() {
+        let error = rgba_image_byte_len(vk::Extent2D {
+            width: u32::MAX,
+            height: u32::MAX,
+        })
+        .expect_err("overflow should be reported");
+
+        assert!(error.to_string().contains("overflowed"));
+    }
 }
