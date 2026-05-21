@@ -31,7 +31,24 @@ Various simplifications will allow for this such as
   | 32       | Start index in the voxel buffer               |
 
 
+### Swatch
+| Bit Size | Stored     |   
+|---------|------------|
+| 4       | Voxel Type |
+| 4       | Red        |
+| 4       | Green      |
+| 4       | Blue       |
+
+
 ### Voxels
 | Bit Size                            | Stored                                                            |   
 |-------------------------------------|-------------------------------------------------------------------|
 | `voxel_count * palette_length_bits` | Palette indices, variable in bit size based on the palette length |
+
+
+# Outstanding ideas that need fleshing out
+
+* Per voxel secondary ray tracing
+  * Shadows, GI, etc
+* Voxel Chunk streaming
+* Editing
