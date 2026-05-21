@@ -14,6 +14,7 @@ static const uint TERRAIN_GRID_SIDE = 12u;
 static const uint THREADS_X = 8u;
 static const uint THREADS_Y = 4u;
 static const uint THREADS_Z = 8u;
+static const uint OCCUPANCY_WORD_BITS = 32u;
 
 uint flatten_index(uint3 position, uint3 dimensions)
 {
@@ -31,6 +32,11 @@ uint3 terrain_dimensions()
 uint chunk_voxel_count(uint3 dimensions)
 {
     return dimensions.x * dimensions.y * dimensions.z;
+}
+
+uint chunk_occupancy_word_count(uint3 dimensions)
+{
+    return (chunk_voxel_count(dimensions) + OCCUPANCY_WORD_BITS - 1u) / OCCUPANCY_WORD_BITS;
 }
 
 int2 terrain_tile_coordinates(uint chunk_index)
@@ -102,9 +108,16 @@ void terrain_gen_main(uint3 dispatch_id : SV_DispatchThreadID)
     }
 
     uint3 local = uint3(dispatch_id.x, dispatch_id.y, local_z);
-    uint voxel_offset = chunk_index * chunk_voxel_count(dimensions);
+    uint voxel_index = flatten_index(local, dimensions);
+    uint word_offset = chunk_index * chunk_occupancy_word_count(dimensions);
     float surface_height = terrain_surface_height(int2(local.x, local.z), dimensions, chunk_index);
 
-    voxel_occupancy[voxel_offset + flatten_index(local, dimensions)] =
-        (float)local.y <= surface_height ? 1u : 0u;
+    if ((float)local.y <= surface_height)
+    {
+        uint word_index = voxel_index / OCCUPANCY_WORD_BITS;
+        uint bit_index = voxel_index % OCCUPANCY_WORD_BITS;
+        InterlockedOr(
+            voxel_occupancy[word_offset + word_index],
+            1u << bit_index);
+    }
 }

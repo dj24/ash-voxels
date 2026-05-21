@@ -470,7 +470,7 @@ impl Renderer {
         )?;
         renderer.voxel_buffer = renderer.create_buffer(
             "voxel occupancy",
-            (size_of::<u32>() * model.occupancy.len() * MAX_OBJECTS) as u64,
+            (model.occupancy_size_bytes() * MAX_OBJECTS) as u64,
             vk::BufferUsageFlags::STORAGE_BUFFER,
             MemoryLocation::CpuToGpu,
         )?;
@@ -1218,6 +1218,7 @@ impl Renderer {
             return self.write_repeated_voxel_occupancy(&model.occupancy, MAX_OBJECTS);
         }
 
+        zero_buffer_bytes(&mut self.voxel_buffer)?;
         terrain::populate_voxel_buffer(self, model)
     }
 
@@ -2764,6 +2765,18 @@ fn write_bytes(buffer: &mut AllocatedBuffer, data: &[u8]) -> Result<(), AppError
         )));
     }
     mapped[..data.len()].copy_from_slice(data);
+    Ok(())
+}
+
+fn zero_buffer_bytes(buffer: &mut AllocatedBuffer) -> Result<(), AppError> {
+    let allocation = buffer
+        .allocation
+        .as_mut()
+        .ok_or_else(|| AppError::Message("buffer allocation missing".to_string()))?;
+    let mapped = allocation
+        .mapped_slice_mut()
+        .ok_or_else(|| AppError::Message("buffer is not host visible".to_string()))?;
+    mapped.fill(0);
     Ok(())
 }
 

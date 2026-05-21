@@ -1,6 +1,10 @@
 use glam::{UVec3, Vec3};
 
-use crate::{assets::VoxelModel, render::Renderer, vk::AppError};
+use crate::{
+    assets::{VoxelModel, occupancy_word_len},
+    render::Renderer,
+    vk::AppError,
+};
 
 pub const TERRAIN_CHUNK_DIMENSIONS: UVec3 = UVec3::new(64, 64, 64);
 pub const TERRAIN_CHUNK_VOXEL_SIZE: f32 = 0.25;
@@ -9,7 +13,7 @@ pub const TERRAIN_GRID_COUNT: usize = TERRAIN_GRID_SIDE * TERRAIN_GRID_SIDE;
 
 pub fn procedural_chunk_model() -> VoxelModel {
     let dimensions = TERRAIN_CHUNK_DIMENSIONS;
-    let occupancy = vec![0u32; flatten_len(dimensions)];
+    let occupancy = vec![0u32; occupancy_word_len(dimensions)];
     let horizontal_extent =
         Vec3::new(dimensions.x as f32, 0.0, dimensions.z as f32) * TERRAIN_CHUNK_VOXEL_SIZE;
     let vertical_extent = dimensions.y as f32 * TERRAIN_CHUNK_VOXEL_SIZE;
@@ -64,10 +68,6 @@ fn terrain_dispatch_group_counts(dimensions: UVec3) -> [u32; 3] {
     [group_count_x, group_count_y, group_count_z]
 }
 
-fn flatten_len(dimensions: UVec3) -> usize {
-    dimensions.x as usize * dimensions.y as usize * dimensions.z as usize
-}
-
 #[cfg(test)]
 mod tests {
     use glam::Vec3;
@@ -76,18 +76,14 @@ mod tests {
         TERRAIN_CHUNK_DIMENSIONS, TERRAIN_CHUNK_VOXEL_SIZE, TERRAIN_GRID_COUNT,
         procedural_chunk_model, terrain_grid_positions,
     };
+    use crate::assets::occupancy_word_len;
 
     #[test]
     fn procedural_chunk_matches_expected_layout() {
         let model = procedural_chunk_model();
 
         assert_eq!(model.dimensions, TERRAIN_CHUNK_DIMENSIONS);
-        assert_eq!(
-            model.occupancy.len(),
-            TERRAIN_CHUNK_DIMENSIONS.x as usize
-                * TERRAIN_CHUNK_DIMENSIONS.y as usize
-                * TERRAIN_CHUNK_DIMENSIONS.z as usize
-        );
+        assert_eq!(model.occupancy.len(), occupancy_word_len(TERRAIN_CHUNK_DIMENSIONS));
         assert_eq!(model.voxel_size, TERRAIN_CHUNK_VOXEL_SIZE);
         assert_eq!(model.bounds_min.y, 0.0);
         assert_eq!(

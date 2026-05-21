@@ -5,9 +5,19 @@ uint flatten_index(uint3 position, uint3 dimensions)
     return position.x + dimensions.x * (position.y + dimensions.y * position.z);
 }
 
-uint object_voxel_offset(uint instance_id, uint3 dimensions)
+uint chunk_voxel_count(uint3 dimensions)
 {
-    return instance_id * (dimensions.x * dimensions.y * dimensions.z);
+    return dimensions.x * dimensions.y * dimensions.z;
+}
+
+uint chunk_occupancy_word_count(uint3 dimensions)
+{
+    return (chunk_voxel_count(dimensions) + OCCUPANCY_WORD_BITS - 1u) / OCCUPANCY_WORD_BITS;
+}
+
+uint object_voxel_word_offset(uint instance_id, uint3 dimensions)
+{
+    return instance_id * chunk_occupancy_word_count(dimensions);
 }
 
 float occupancy_at(int3 position, uint3 dimensions, uint instance_id)
@@ -17,8 +27,12 @@ float occupancy_at(int3 position, uint3 dimensions, uint instance_id)
         return 0.0f;
     }
 
-    uint offset = object_voxel_offset(instance_id, dimensions);
-    return voxel_occupancy[offset + flatten_index(uint3(position), dimensions)] == 0u ? 0.0f : 1.0f;
+    uint voxel_index = flatten_index(uint3(position), dimensions);
+    uint offset = object_voxel_word_offset(instance_id, dimensions);
+    uint word_index = voxel_index / OCCUPANCY_WORD_BITS;
+    uint bit_index = voxel_index % OCCUPANCY_WORD_BITS;
+    uint word = voxel_occupancy[offset + word_index];
+    return ((word >> bit_index) & 1u) == 0u ? 0.0f : 1.0f;
 }
 
 float3 fallback_normal(float3 direction, int last_axis, int3 step_dir)

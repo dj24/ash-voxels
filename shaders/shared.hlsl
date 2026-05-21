@@ -37,3 +37,4 @@ static const float PI = 3.1415926535f;
 static const float COARSE_DEPTH_NEAR = 0.1f;
 static const float COARSE_DEPTH_FAR = 1000.0f;
 static const uint TERRAIN_GRID_SIDE = 12u;
+static const uint OCCUPANCY_WORD_BITS = 32u;

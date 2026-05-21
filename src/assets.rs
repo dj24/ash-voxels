@@ -9,6 +9,7 @@ use crate::vk::AppError;
 
 pub const DRAGON_ASSET_PATH: &str = "assets/dragon.vox";
 pub const MODEL_TARGET_LONGEST_AXIS: f32 = 0.9;
+const OCCUPANCY_WORD_BITS: usize = u32::BITS as usize;
 
 #[derive(Clone, Debug)]
 pub struct VoxelModel {
@@ -70,10 +71,10 @@ impl VoxelModel {
         let bounds_min = -extent * 0.5;
         let bounds_max = extent * 0.5;
 
-        let mut occupancy = vec![0u32; flatten_len(dimensions)];
+        let mut occupancy = vec![0u32; occupancy_word_len(dimensions)];
         for position in occupied_positions {
             let local = position - occupied_min;
-            occupancy[flatten_index(local, dimensions)] = 1;
+            set_occupancy_bit(&mut occupancy, flatten_index(local, dimensions));
         }
 
         Ok(Self {
@@ -89,6 +90,14 @@ impl VoxelModel {
         self.bounds_max - self.bounds_min
     }
 
+    pub fn voxel_count(&self) -> usize {
+        voxel_count(self.dimensions)
+    }
+
+    pub fn occupancy_word_count(&self) -> usize {
+        occupancy_word_len(self.dimensions)
+    }
+
     pub fn occupancy_size_bytes(&self) -> usize {
         self.occupancy.len() * std::mem::size_of::<u32>()
     }
@@ -98,19 +107,44 @@ impl VoxelModel {
     }
 }
 
-fn flatten_len(dimensions: UVec3) -> usize {
+pub fn voxel_count(dimensions: UVec3) -> usize {
     dimensions.x as usize * dimensions.y as usize * dimensions.z as usize
 }
 
-fn flatten_index(position: UVec3, dimensions: UVec3) -> usize {
+pub fn occupancy_word_len(dimensions: UVec3) -> usize {
+    voxel_count(dimensions).div_ceil(OCCUPANCY_WORD_BITS)
+}
+
+pub fn flatten_index(position: UVec3, dimensions: UVec3) -> usize {
     position.x as usize
         + dimensions.x as usize
             * (position.y as usize + dimensions.y as usize * position.z as usize)
 }
 
+pub fn occupancy_word_and_mask(index: usize) -> (usize, u32) {
+    let word_index = index / OCCUPANCY_WORD_BITS;
+    let bit_index = index % OCCUPANCY_WORD_BITS;
+    (word_index, 1u32 << bit_index)
+}
+
+pub fn set_occupancy_bit(occupancy: &mut [u32], index: usize) {
+    let (word_index, bit_mask) = occupancy_word_and_mask(index);
+    occupancy[word_index] |= bit_mask;
+}
+
+pub fn occupancy_bit_is_set(occupancy: &[u32], index: usize) -> bool {
+    let (word_index, bit_mask) = occupancy_word_and_mask(index);
+    occupancy[word_index] & bit_mask != 0
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{MODEL_TARGET_LONGEST_AXIS, VoxelModel};
+    use glam::UVec3;
+
+    use super::{
+        MODEL_TARGET_LONGEST_AXIS, VoxelModel, occupancy_bit_is_set, occupancy_word_len,
+        set_occupancy_bit, voxel_count,
+    };
 
     #[test]
     fn dragon_model_loads() {
@@ -122,8 +156,7 @@ mod tests {
     #[test]
     fn dragon_occupancy_matches_dimensions() {
         let model = VoxelModel::load_dragon().expect("dragon.vox should load");
-        let expected_len =
-            model.dimensions.x as usize * model.dimensions.y as usize * model.dimensions.z as usize;
+        let expected_len = occupancy_word_len(model.dimensions);
 
         assert_eq!(model.occupancy.len(), expected_len);
     }
@@ -134,5 +167,29 @@ mod tests {
         let longest_axis = model.extent().max_element();
 
         assert!(longest_axis <= MODEL_TARGET_LONGEST_AXIS + f32::EPSILON);
+    }
+
+    #[test]
+    fn occupancy_word_count_rounds_up_to_full_words() {
+        let dimensions = UVec3::new(3, 3, 4);
+
+        assert_eq!(voxel_count(dimensions), 36);
+        assert_eq!(occupancy_word_len(dimensions), 2);
+    }
+
+    #[test]
+    fn occupancy_bits_can_cross_word_boundaries() {
+        let mut occupancy = vec![0u32; occupancy_word_len(UVec3::new(13, 1, 5))];
+        let indices = [0usize, 31, 32, 64];
+
+        for index in indices {
+            set_occupancy_bit(&mut occupancy, index);
+        }
+
+        for index in indices {
+            assert!(occupancy_bit_is_set(&occupancy, index));
+        }
+        assert!(!occupancy_bit_is_set(&occupancy, 30));
+        assert!(!occupancy_bit_is_set(&occupancy, 33));
     }
 }
