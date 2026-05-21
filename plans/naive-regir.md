@@ -19,7 +19,8 @@ In a ReGIR-like fashion, we can take advantage of our axis-aligned voxel grid an
 ## Temporal Reuse
 * The grid will be axis aligned around the player
 * Reuse will involve re-snapping the grid based on camera position, if the camera has passed that mip's size threshold
-* Instead of full buckets with sample counts, weights, etc, we will use an exponential moving average of the radiance `radiance = mix(radiance, new_colour ,0.95)`
+* Instead of full buckets with sample counts, weights, etc, we will use an exponential moving average of the radiance `radiance = mix(new_colour, radiance ,0.95)`
+* Weighting can be adjusted by the change in camera diretion - without this we could get major ghosting or light leaks
 
 ## Outstanding Issues
 * How can we get normals in the grid without tracing rays from the camera?
