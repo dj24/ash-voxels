@@ -9,8 +9,6 @@ use crate::vk::AppError;
 
 pub const DRAGON_ASSET_PATH: &str = "assets/dragon.vox";
 pub const MODEL_TARGET_LONGEST_AXIS: f32 = 0.9;
-pub const TERRAIN_CHUNK_DIMENSIONS: UVec3 = UVec3::new(64, 64, 64);
-pub const TERRAIN_CHUNK_VOXEL_SIZE: f32 = 0.25;
 
 #[derive(Clone, Debug)]
 pub struct VoxelModel {
@@ -22,26 +20,6 @@ pub struct VoxelModel {
 }
 
 impl VoxelModel {
-    pub fn procedural_terrain_chunk() -> Self {
-        let dimensions = TERRAIN_CHUNK_DIMENSIONS;
-        let occupancy = vec![0u32; flatten_len(dimensions)];
-        let horizontal_extent =
-            Vec3::new(dimensions.x as f32, 0.0, dimensions.z as f32) * TERRAIN_CHUNK_VOXEL_SIZE;
-        let vertical_extent = dimensions.y as f32 * TERRAIN_CHUNK_VOXEL_SIZE;
-
-        Self {
-            dimensions,
-            occupancy,
-            bounds_min: Vec3::new(-horizontal_extent.x * 0.5, 0.0, -horizontal_extent.z * 0.5),
-            bounds_max: Vec3::new(
-                horizontal_extent.x * 0.5,
-                vertical_extent,
-                horizontal_extent.z * 0.5,
-            ),
-            voxel_size: TERRAIN_CHUNK_VOXEL_SIZE,
-        }
-    }
-
     pub fn load_dragon() -> Result<Self, AppError> {
         let asset_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(DRAGON_ASSET_PATH);
         Self::load_from_file(&asset_path)
@@ -124,9 +102,7 @@ fn flatten_index(position: UVec3, dimensions: UVec3) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        MODEL_TARGET_LONGEST_AXIS, TERRAIN_CHUNK_DIMENSIONS, TERRAIN_CHUNK_VOXEL_SIZE, VoxelModel,
-    };
+    use super::{MODEL_TARGET_LONGEST_AXIS, VoxelModel};
 
     #[test]
     fn dragon_model_loads() {
@@ -150,24 +126,5 @@ mod tests {
         let longest_axis = model.extent().max_element();
 
         assert!(longest_axis <= MODEL_TARGET_LONGEST_AXIS + f32::EPSILON);
-    }
-
-    #[test]
-    fn procedural_terrain_chunk_matches_expected_layout() {
-        let model = VoxelModel::procedural_terrain_chunk();
-
-        assert_eq!(model.dimensions, TERRAIN_CHUNK_DIMENSIONS);
-        assert_eq!(
-            model.occupancy.len(),
-            TERRAIN_CHUNK_DIMENSIONS.x as usize
-                * TERRAIN_CHUNK_DIMENSIONS.y as usize
-                * TERRAIN_CHUNK_DIMENSIONS.z as usize
-        );
-        assert_eq!(model.voxel_size, TERRAIN_CHUNK_VOXEL_SIZE);
-        assert_eq!(model.bounds_min.y, 0.0);
-        assert_eq!(
-            model.bounds_max.y,
-            TERRAIN_CHUNK_DIMENSIONS.y as f32 * TERRAIN_CHUNK_VOXEL_SIZE
-        );
     }
 }

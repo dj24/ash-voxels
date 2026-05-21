@@ -59,9 +59,6 @@ pub struct VoxelProceduralObject {
     pub voxel_dimensions: UVec3,
 }
 
-pub const TERRAIN_GRID_SIDE: usize = 12;
-pub const TERRAIN_GRID_COUNT: usize = TERRAIN_GRID_SIDE * TERRAIN_GRID_SIDE;
-
 impl From<&VoxelModel> for VoxelProceduralObject {
     fn from(value: &VoxelModel) -> Self {
         Self {
@@ -81,24 +78,6 @@ impl VoxelProceduralObject {
     pub fn voxel_dimensions(&self) -> UVec3 {
         self.voxel_dimensions
     }
-}
-
-pub fn terrain_grid_positions(tile_extent: Vec3) -> Vec<Vec3> {
-    let x_spacing = tile_extent.x.max(0.001);
-    let z_spacing = tile_extent.z.max(0.001);
-    let half_extent_x = (TERRAIN_GRID_SIDE as f32 - 1.0) * x_spacing * 0.5;
-    let half_extent_z = (TERRAIN_GRID_SIDE as f32 - 1.0) * z_spacing * 0.5;
-    let mut positions = Vec::with_capacity(TERRAIN_GRID_COUNT);
-    for z in 0..TERRAIN_GRID_SIDE {
-        for x in 0..TERRAIN_GRID_SIDE {
-            positions.push(Vec3::new(
-                x as f32 * x_spacing - half_extent_x,
-                0.0,
-                z as f32 * z_spacing - half_extent_z,
-            ));
-        }
-    }
-    positions
 }
 
 #[repr(C)]

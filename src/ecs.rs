@@ -8,10 +8,8 @@ use glam::Vec3;
 use winit::keyboard::KeyCode;
 
 use crate::assets::VoxelModel;
-use crate::scene::{
-    Camera, ExtractedScene, RenderObjectData, SceneUniform, VoxelProceduralObject,
-    terrain_grid_positions,
-};
+use crate::scene::{Camera, ExtractedScene, RenderObjectData, SceneUniform, VoxelProceduralObject};
+use crate::terrain::terrain_grid_positions;
 
 #[derive(SystemSet, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum AppSet {

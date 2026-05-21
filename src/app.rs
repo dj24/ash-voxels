@@ -15,7 +15,7 @@ use winit::{
     window::Window,
 };
 
-use crate::{assets::VoxelModel, ecs, render::Renderer, vk::AppError};
+use crate::{ecs, render::Renderer, terrain, vk::AppError};
 
 const DEFAULT_CAPTURE_SIZE: [u32; 2] = [1280, 720];
 
@@ -67,7 +67,10 @@ struct RuntimeConfig {
 #[derive(Debug, PartialEq, Eq)]
 enum LaunchMode {
     Interactive,
-    HeadlessCapture { output_path: PathBuf, delay: Duration },
+    HeadlessCapture {
+        output_path: PathBuf,
+        delay: Duration,
+    },
 }
 
 impl RuntimeConfig {
@@ -150,7 +153,7 @@ impl AppState {
             .map_err(|error| AppError::Message(error.to_string()))?;
 
         let initial_size = window.inner_size();
-        let voxel_model = VoxelModel::procedural_terrain_chunk();
+        let voxel_model = terrain::procedural_chunk_model();
         let mut world = ecs::create_world([initial_size.width, initial_size.height], &voxel_model);
         let schedule = ecs::create_schedule();
 
@@ -203,7 +206,7 @@ struct HeadlessAppState {
 
 impl HeadlessAppState {
     fn new() -> Result<Self, AppError> {
-        let voxel_model = VoxelModel::procedural_terrain_chunk();
+        let voxel_model = terrain::procedural_chunk_model();
         let mut world = ecs::create_world(DEFAULT_CAPTURE_SIZE, &voxel_model);
         let schedule = ecs::create_schedule();
         let renderer = Renderer::new_headless(DEFAULT_CAPTURE_SIZE, &voxel_model)?;
@@ -326,13 +329,8 @@ mod tests {
 
     #[test]
     fn headless_mode_accepts_path_and_delay() {
-        let config = parse_runtime_config([
-            "--headless-png",
-            "capture.png",
-            "--delay-ms",
-            "1500",
-        ])
-        .expect("headless launch config");
+        let config = parse_runtime_config(["--headless-png", "capture.png", "--delay-ms", "1500"])
+            .expect("headless launch config");
 
         assert_eq!(
             config,
@@ -350,9 +348,11 @@ mod tests {
         let error = parse_runtime_config(["--headless-png", "capture.png"])
             .expect_err("missing delay should error");
 
-        assert!(error
-            .to_string()
-            .contains("--delay-ms is required when using --headless-png"));
+        assert!(
+            error
+                .to_string()
+                .contains("--delay-ms is required when using --headless-png")
+        );
     }
 
     #[test]

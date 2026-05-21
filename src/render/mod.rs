@@ -21,11 +21,9 @@ use tracing::{info, warn};
 
 use crate::{
     assets::VoxelModel,
-    scene::{
-        ExtractedScene, RenderObjectData, TERRAIN_GRID_COUNT, VoxelProceduralObject,
-        terrain_grid_positions,
-    },
+    scene::{ExtractedScene, RenderObjectData, VoxelProceduralObject},
     shader_build::{compiled_shader_artifact, compiled_shader_artifacts},
+    terrain::{self, TERRAIN_GRID_COUNT, terrain_grid_positions},
     vk::AppError,
 };
 
@@ -419,8 +417,11 @@ impl Renderer {
             }
             RendererMode::Headless => {
                 let storage_format = renderer.pick_headless_output_storage_format()?;
-                renderer.output_image =
-                    renderer.create_storage_image(renderer.extent, storage_format, "output image")?;
+                renderer.output_image = renderer.create_storage_image(
+                    renderer.extent,
+                    storage_format,
+                    "output image",
+                )?;
                 renderer.capture_image = renderer.create_capture_image(renderer.extent)?;
                 renderer.readback_buffer = renderer.create_readback_buffer(renderer.extent)?;
             }
@@ -502,11 +503,11 @@ impl Renderer {
                 .as_ref()
                 .expect("windowed renderer should have a swapchain loader")
                 .acquire_next_image(
-                self.swapchain,
-                u64::MAX,
-                self.image_available,
-                vk::Fence::null(),
-            ) {
+                    self.swapchain,
+                    u64::MAX,
+                    self.image_available,
+                    vk::Fence::null(),
+                ) {
                 Ok(pair) => pair,
                 Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
                     self.recreate_swapchain(self.extent.width, self.extent.height)?;
@@ -639,7 +640,8 @@ impl Renderer {
 
     fn wait_for_in_flight(&self) -> Result<(), AppError> {
         unsafe {
-            self.device.wait_for_fences(&[self.in_flight], true, u64::MAX)?;
+            self.device
+                .wait_for_fences(&[self.in_flight], true, u64::MAX)?;
         }
         Ok(())
     }
@@ -658,13 +660,16 @@ impl Renderer {
             .as_ref()
             .expect("windowed renderer should have a surface loader");
         let capabilities = unsafe {
-            surface_loader.get_physical_device_surface_capabilities(self.physical_device, self.surface)?
+            surface_loader
+                .get_physical_device_surface_capabilities(self.physical_device, self.surface)?
         };
         let formats = unsafe {
-            surface_loader.get_physical_device_surface_formats(self.physical_device, self.surface)?
+            surface_loader
+                .get_physical_device_surface_formats(self.physical_device, self.surface)?
         };
         let present_modes = unsafe {
-            surface_loader.get_physical_device_surface_present_modes(self.physical_device, self.surface)?
+            surface_loader
+                .get_physical_device_surface_present_modes(self.physical_device, self.surface)?
         };
 
         let chosen_format = formats
@@ -1168,19 +1173,31 @@ impl Renderer {
 
     fn populate_voxel_buffer(&mut self, model: &VoxelModel) -> Result<(), AppError> {
         if model.occupancy.iter().any(|value| *value != 0) {
-            let mut repeated = Vec::with_capacity(model.occupancy.len() * MAX_OBJECTS);
-            for _ in 0..MAX_OBJECTS {
-                repeated.extend_from_slice(&model.occupancy);
-            }
-            write_bytes(&mut self.voxel_buffer, bytemuck::cast_slice(&repeated))?;
-            return Ok(());
+            return self.write_repeated_voxel_occupancy(&model.occupancy, MAX_OBJECTS);
         }
 
-        self.generate_terrain_voxels(model)
+        terrain::populate_voxel_buffer(self, model)
     }
 
-    fn generate_terrain_voxels(&mut self, model: &VoxelModel) -> Result<(), AppError> {
-        let shader_path = compiled_shader_artifact("terrain_gen.spv");
+    pub(crate) fn write_repeated_voxel_occupancy(
+        &mut self,
+        occupancy: &[u32],
+        repeat_count: usize,
+    ) -> Result<(), AppError> {
+        let mut repeated = Vec::with_capacity(occupancy.len() * repeat_count);
+        for _ in 0..repeat_count {
+            repeated.extend_from_slice(occupancy);
+        }
+        write_bytes(&mut self.voxel_buffer, bytemuck::cast_slice(&repeated))
+    }
+
+    pub(crate) fn run_compute_shader(
+        &mut self,
+        shader_artifact_name: &str,
+        entry_point: &CStr,
+        group_counts: [u32; 3],
+    ) -> Result<(), AppError> {
+        let shader_path = compiled_shader_artifact(shader_artifact_name);
         let bytes = std::fs::read(&shader_path)?;
         let code = read_spv(&mut Cursor::new(bytes))
             .map_err(|error| AppError::Message(error.to_string()))?;
@@ -1191,7 +1208,7 @@ impl Renderer {
 
         let stage = vk::PipelineShaderStageCreateInfo::default()
             .module(shader_module)
-            .name(c"terrain_gen_main")
+            .name(entry_point)
             .stage(vk::ShaderStageFlags::COMPUTE);
         let pipeline_info = vk::ComputePipelineCreateInfo::default()
             .stage(stage)
@@ -1202,11 +1219,6 @@ impl Renderer {
                 .create_compute_pipelines(vk::PipelineCache::null(), &[pipeline_info], None)
                 .map_err(|(_, error)| error)?
         }[0];
-
-        let group_count_x = model.dimensions.x.div_ceil(8);
-        let group_count_y = model.dimensions.y.div_ceil(4);
-        let total_depth = model.dimensions.z * MAX_OBJECTS as u32;
-        let group_count_z = total_depth.div_ceil(8);
 
         self.immediate_submit(|renderer, command_buffer| unsafe {
             renderer.device.cmd_bind_pipeline(
@@ -1224,9 +1236,9 @@ impl Renderer {
             );
             renderer.device.cmd_dispatch(
                 command_buffer,
-                group_count_x,
-                group_count_y,
-                group_count_z,
+                group_counts[0],
+                group_counts[1],
+                group_counts[2],
             );
             renderer.device.cmd_pipeline_barrier(
                 command_buffer,
@@ -1652,9 +1664,10 @@ impl Renderer {
             self.instance
                 .get_physical_device_format_properties(self.physical_device, HEADLESS_OUTPUT_FORMAT)
         };
-        if props.optimal_tiling_features.contains(
-            vk::FormatFeatureFlags::STORAGE_IMAGE | vk::FormatFeatureFlags::BLIT_SRC,
-        ) {
+        if props
+            .optimal_tiling_features
+            .contains(vk::FormatFeatureFlags::STORAGE_IMAGE | vk::FormatFeatureFlags::BLIT_SRC)
+        {
             return Ok(HEADLESS_OUTPUT_FORMAT);
         }
 
@@ -1666,8 +1679,10 @@ impl Renderer {
 
     fn create_capture_image(&mut self, extent: vk::Extent2D) -> Result<AllocatedImage, AppError> {
         let props = unsafe {
-            self.instance
-                .get_physical_device_format_properties(self.physical_device, HEADLESS_CAPTURE_FORMAT)
+            self.instance.get_physical_device_format_properties(
+                self.physical_device,
+                HEADLESS_CAPTURE_FORMAT,
+            )
         };
         if !props
             .optimal_tiling_features
@@ -1725,7 +1740,10 @@ impl Renderer {
         })
     }
 
-    fn create_readback_buffer(&mut self, extent: vk::Extent2D) -> Result<AllocatedBuffer, AppError> {
+    fn create_readback_buffer(
+        &mut self,
+        extent: vk::Extent2D,
+    ) -> Result<AllocatedBuffer, AppError> {
         self.create_buffer(
             "capture readback",
             rgba_image_byte_len(extent)? as u64,
