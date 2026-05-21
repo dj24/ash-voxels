@@ -52,17 +52,19 @@ Assumptions for the table below:
 * Chunk dimensions are `64x64x64` (`262,144` voxels)
 * Regions are `8x8x8` (`512` voxels per region, `512` regions per chunk)
 * Exactly `2` voxel colours are used, so palette indices cost `1` bit per occupied voxel
-* `ChunkRegion` payloads are only allocated for non-empty regions
+* Region headers are already included in the fixed `Chunk` size
+* Blob payloads are only allocated for non-empty regions
 * `2` colours means each populated region stores `4` bytes of swatches
-* Each populated region stores `65` bytes of header (`64` occupancy bitmask + `1` palette length)
-* Total bytes = `2060 + populated_regions * 69 + occupied_voxels / 8`
+* With region bitfields removed, a populated `8x8x8` region stores palette indices for all `512` voxels
+* At `2` colours, that index payload is `512 bits = 64 bytes` per populated region
+* Total bytes = `2124 + populated_regions * 68`
 
 | Chunk Fill | Occupied Voxels | Populated Regions | Total Bytes | Total KiB | Reduction vs 512 KiB dense array |
 |------------|-----------------|-------------------|-------------|-----------|----------------------------------|
-| 0%         | 0               | 0                 | 2,060       | 2.01      | 99.61%                           |
-| 25%        | 65,536          | 128               | 19,084      | 18.64     | 96.36%                           |
-| 50%        | 131,072         | 256               | 36,108      | 35.26     | 93.11%                           |
-| 100%       | 262,144         | 512               | 70,156      | 68.51     | 86.62%                           |
+| 0%         | 0               | 0                 | 2,124       | 2.07      | 99.59%                           |
+| 25%        | 65,536          | 128               | 10,828      | 10.57     | 97.93%                           |
+| 50%        | 131,072         | 256               | 19,532      | 19.07     | 96.27%                           |
+| 100%       | 262,144         | 512               | 36,940      | 36.07     | 92.95%                           |
 
 This table assumes occupied voxels are packed as densely as possible into regions.
 
@@ -89,6 +91,7 @@ For comparison, a dense `2-byte` per voxel array would use `262,144 * 2 = 524,28
 
 # Outstanding ideas that need fleshing out
 
+* Solid chunk handling
 * Compression algorithm
 * Voxel Chunk streaming
 * Editing
