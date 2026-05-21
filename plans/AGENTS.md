@@ -1,0 +1,1 @@
+* This is a prototype / demo repo for now, so do not worry about retaining existing structures or paradigms
