@@ -37,6 +37,7 @@ const WINDOWED_DEVICE_EXTENSIONS: &[&CStr] = &[
     ash::khr::deferred_host_operations::NAME,
     ash::khr::buffer_device_address::NAME,
     ash::ext::descriptor_indexing::NAME,
+    ash::ext::conservative_rasterization::NAME,
     ash::khr::spirv_1_4::NAME,
     ash::khr::shader_float_controls::NAME,
 ];
@@ -47,6 +48,7 @@ const HEADLESS_DEVICE_EXTENSIONS: &[&CStr] = &[
     ash::khr::deferred_host_operations::NAME,
     ash::khr::buffer_device_address::NAME,
     ash::ext::descriptor_indexing::NAME,
+    ash::ext::conservative_rasterization::NAME,
     ash::khr::spirv_1_4::NAME,
     ash::khr::shader_float_controls::NAME,
 ];
@@ -833,12 +835,12 @@ impl Renderer {
                 .binding(5)
                 .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
                 .descriptor_count(1)
-                .stage_flags(vk::ShaderStageFlags::COMPUTE),
+                .stage_flags(vk::ShaderStageFlags::COMPUTE | vk::ShaderStageFlags::RAYGEN_KHR),
             vk::DescriptorSetLayoutBinding::default()
                 .binding(6)
                 .descriptor_type(vk::DescriptorType::SAMPLER)
                 .descriptor_count(1)
-                .stage_flags(vk::ShaderStageFlags::COMPUTE),
+                .stage_flags(vk::ShaderStageFlags::COMPUTE | vk::ShaderStageFlags::RAYGEN_KHR),
         ];
 
         self.descriptor_set_layout = unsafe {
@@ -1457,7 +1459,7 @@ impl Renderer {
 
     fn record_render_to_output_commands(&mut self) {
         self.record_coarse_depth_prepass_commands();
-        self.record_coarse_depth_debug_commands();
+        self.record_ray_trace_output_commands();
     }
 
     fn record_coarse_depth_prepass_commands(&mut self) {
@@ -1468,7 +1470,7 @@ impl Renderer {
                 vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
             ),
             vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL => (
-                vk::PipelineStageFlags::COMPUTE_SHADER,
+                vk::PipelineStageFlags::RAY_TRACING_SHADER_KHR,
                 vk::AccessFlags::SHADER_READ,
             ),
             _ => (
@@ -1546,7 +1548,7 @@ impl Renderer {
             vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
             vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL,
             vk::PipelineStageFlags::LATE_FRAGMENT_TESTS,
-            vk::PipelineStageFlags::COMPUTE_SHADER,
+            vk::PipelineStageFlags::RAY_TRACING_SHADER_KHR,
             vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
             vk::AccessFlags::SHADER_READ,
             vk::ImageAspectFlags::DEPTH,
@@ -1554,10 +1556,10 @@ impl Renderer {
         self.coarse_depth_image.layout = vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL;
     }
 
-    fn record_coarse_depth_debug_commands(&mut self) {
+    fn record_ray_trace_output_commands(&mut self) {
         let (src_stage, src_access) = match self.output_image.layout {
             vk::ImageLayout::GENERAL => (
-                vk::PipelineStageFlags::COMPUTE_SHADER,
+                vk::PipelineStageFlags::RAY_TRACING_SHADER_KHR,
                 vk::AccessFlags::SHADER_WRITE,
             ),
             vk::ImageLayout::TRANSFER_SRC_OPTIMAL => (
@@ -1577,38 +1579,36 @@ impl Renderer {
             self.output_image.layout,
             vk::ImageLayout::GENERAL,
             src_stage,
-            vk::PipelineStageFlags::COMPUTE_SHADER,
+            vk::PipelineStageFlags::RAY_TRACING_SHADER_KHR,
             src_access,
             vk::AccessFlags::SHADER_WRITE,
             vk::ImageAspectFlags::COLOR,
         );
         self.output_image.layout = vk::ImageLayout::GENERAL;
 
-        let group_counts = [
-            self.extent.width.div_ceil(8),
-            self.extent.height.div_ceil(8),
-            1,
-        ];
-
         unsafe {
             self.device.cmd_bind_pipeline(
                 self.command_buffer,
-                vk::PipelineBindPoint::COMPUTE,
-                self.coarse_depth_debug_pipeline,
+                vk::PipelineBindPoint::RAY_TRACING_KHR,
+                self.pipeline,
             );
             self.device.cmd_bind_descriptor_sets(
                 self.command_buffer,
-                vk::PipelineBindPoint::COMPUTE,
+                vk::PipelineBindPoint::RAY_TRACING_KHR,
                 self.pipeline_layout,
                 0,
                 &[self.descriptor_set],
                 &[],
             );
-            self.device.cmd_dispatch(
+            self.ray_tracing_pipeline_loader.cmd_trace_rays(
                 self.command_buffer,
-                group_counts[0],
-                group_counts[1],
-                group_counts[2],
+                &self.sbt.raygen_region,
+                &self.sbt.miss_region,
+                &self.sbt.hit_region,
+                &vk::StridedDeviceAddressRegionKHR::default(),
+                self.extent.width,
+                self.extent.height,
+                1,
             );
         }
 
@@ -1618,7 +1618,7 @@ impl Renderer {
             self.output_image.image,
             vk::ImageLayout::GENERAL,
             vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-            vk::PipelineStageFlags::COMPUTE_SHADER,
+            vk::PipelineStageFlags::RAY_TRACING_SHADER_KHR,
             vk::PipelineStageFlags::TRANSFER,
             vk::AccessFlags::SHADER_WRITE,
             vk::AccessFlags::TRANSFER_READ,
@@ -1809,6 +1809,12 @@ impl Renderer {
             .cull_mode(vk::CullModeFlags::NONE)
             .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
             .line_width(1.0);
+        let mut conservative_rasterization_state =
+            vk::PipelineRasterizationConservativeStateCreateInfoEXT::default()
+                .conservative_rasterization_mode(vk::ConservativeRasterizationModeEXT::OVERESTIMATE)
+                .extra_primitive_overestimation_size(0.0);
+        let rasterization_state =
+            rasterization_state.push_next(&mut conservative_rasterization_state);
         let multisample_state = vk::PipelineMultisampleStateCreateInfo::default()
             .rasterization_samples(vk::SampleCountFlags::TYPE_1);
         let color_blend_state = vk::PipelineColorBlendStateCreateInfo::default();

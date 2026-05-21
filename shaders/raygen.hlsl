@@ -115,6 +115,12 @@ float4 overlay_fps_counter(uint2 launch_index, uint2 launch_size, float4 color)
     return float4(composited, color.a);
 }
 
+float coarse_depth_to_linear_distance(float depth)
+{
+    return (COARSE_DEPTH_NEAR * COARSE_DEPTH_FAR)
+        / (COARSE_DEPTH_FAR - depth * (COARSE_DEPTH_FAR - COARSE_DEPTH_NEAR));
+}
+
 [shader("raygeneration")]
 void raygen_main()
 {
@@ -135,8 +141,19 @@ void raygen_main()
     RayDesc ray;
     ray.Origin = scene_uniform.camera_position.xyz;
     ray.Direction = ray_direction;
-    ray.TMin = 0.001f;
     ray.TMax = 1000.0f;
+
+    float depth = coarse_depth_texture.SampleLevel(coarse_depth_sampler, pixel_center, 0.0f);
+    float coarse_depth_bias = 0.5f;
+    if (depth < 1.0f)
+    {
+        float linear_depth = coarse_depth_to_linear_distance(depth);
+        ray.TMin = clamp(linear_depth - coarse_depth_bias, 0.001f, ray.TMax - 0.001f);
+    }
+    else
+    {
+        ray.TMin = 0.001f;
+    }
 
     RayPayload payload;
     payload.color = float4(0.0f, 0.0f, 0.0f, 1.0f);
