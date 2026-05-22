@@ -138,19 +138,47 @@ float4 shade_voxel(float3 normal)
     return float4(albedo * diffuse, 1.0f);
 }
 
-struct VoxelHit
+float3 heatmap_ramp(float t)
 {
-    bool hit;
-    float ray_t;
-    float3 normal;
-};
+    float3 cool = float3(0.04f, 0.05f, 0.08f);
+    float3 blue = float3(0.05f, 0.32f, 0.95f);
+    float3 cyan = float3(0.05f, 0.9f, 0.95f);
+    float3 yellow = float3(1.0f, 0.9f, 0.15f);
+    float3 hot = float3(1.0f, 0.18f, 0.08f);
 
-VoxelHit trace_voxel_scene(RayDesc ray)
+    t = saturate(t);
+    if (t < 0.25f)
+    {
+        return lerp(cool, blue, t / 0.25f);
+    }
+    if (t < 0.5f)
+    {
+        return lerp(blue, cyan, (t - 0.25f) / 0.25f);
+    }
+    if (t < 0.75f)
+    {
+        return lerp(cyan, yellow, (t - 0.5f) / 0.25f);
+    }
+    return lerp(yellow, hot, (t - 0.75f) / 0.25f);
+}
+
+float4 shade_ray_complexity(float4 base_color, uint step_count)
 {
-    VoxelHit best_hit;
-    best_hit.hit = false;
-    best_hit.ray_t = ray.TMax;
+    const float max_visualized_steps = 512.0f;
+    float normalized_steps = saturate(log2((float)step_count + 1.0f) / log2(max_visualized_steps + 1.0f));
+    float3 heatmap = heatmap_ramp(normalized_steps);
+    float3 debug_color = lerp(base_color.rgb * 0.18f, heatmap, 0.88f);
+    return float4(debug_color, base_color.a);
+}
+
+RayData trace_voxel_scene(RayDesc ray)
+{
+    RayData best_hit;
+    best_hit.color = shade_sky(ray.Direction);
     best_hit.normal = float3(0.0f, 1.0f, 0.0f);
+    best_hit.ray_t = ray.TMax;
+    best_hit.step_count = 0u;
+    best_hit.hit = 0u;
 
     RayQuery<RAY_FLAG_NONE> ray_query;
     ray_query.TraceRayInline(scene_acceleration, RAY_FLAG_NONE, 0xFF, ray);
@@ -167,6 +195,7 @@ VoxelHit trace_voxel_scene(RayDesc ray)
         RenderObjectData object = objects[instance_id];
         float candidate_hit_t;
         float3 candidate_normal;
+        uint candidate_step_count;
 
         if (!intersect_voxel_object(
             ray_query.CandidateObjectRayOrigin(),
@@ -176,15 +205,19 @@ VoxelHit trace_voxel_scene(RayDesc ray)
             object,
             instance_id,
             candidate_hit_t,
-            candidate_normal))
+            candidate_normal,
+            candidate_step_count))
         {
+            best_hit.step_count += candidate_step_count;
             continue;
         }
 
+        best_hit.step_count += candidate_step_count;
         ray_query.CommitProceduralPrimitiveHit(candidate_hit_t);
-        best_hit.hit = true;
+        best_hit.hit = 1u;
         best_hit.ray_t = candidate_hit_t;
         best_hit.normal = candidate_normal;
+        best_hit.color = shade_voxel(candidate_normal);
     }
 
     return best_hit;
@@ -226,7 +259,7 @@ void ray_query_main(uint3 dispatch_id : SV_DispatchThreadID)
         ray.TMin = clamp(linear_depth - coarse_depth_bias, 0.001f, ray.TMax - 0.001f);
     }
 
-    VoxelHit hit = trace_voxel_scene(ray);
-    float4 color = hit.hit ? shade_voxel(hit.normal) : shade_sky(ray_direction);
-    output_image[launch_index] = overlay_fps_counter(launch_index, launch_size, color);
+    RayData ray_data = trace_voxel_scene(ray);
+    float4 debug_color = shade_ray_complexity(ray_data.color, ray_data.step_count);
+    output_image[launch_index] = overlay_fps_counter(launch_index, launch_size, debug_color);
 }

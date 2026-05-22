@@ -9,7 +9,7 @@ Prototype Vulkan voxel renderer built directly on `ash`, with a small Bevy ECS a
 - `src/ecs.rs`: frame state, input state, camera movement, and scene extraction schedule.
 - `src/scene.rs`: render-facing scene data types like `Camera`, `SceneUniform`, `RenderObjectData`, and `ExtractedScene`.
 - `src/terrain.rs`: procedural terrain model setup and the compute dispatch used to populate voxel occupancy on the GPU.
-- `src/assets.rs`: `.vox` loading and conversion into the repo's `VoxelModel` format.
+- `src/assets.rs`: fixed chunk occupancy layout and CPU helpers for the hierarchical voxel buffer.
 - `src/render/mod.rs`: the renderer and almost all Vulkan-specific code.
 - `src/shader_build.rs`: runtime helpers for locating compiled shader artifacts in `OUT_DIR`.
 - `src/vk.rs`: shared `AppError` type for Vulkan and app errors.
@@ -49,8 +49,8 @@ The runtime path is:
   - `terrain_grid_positions()`: places chunks in a centered grid.
   - `populate_voxel_buffer()`: runs the terrain compute shader through the renderer.
 - `src/assets.rs`
-  - `VoxelModel::load_from_file()`: loads MagicaVoxel `.vox` assets.
-  - `VoxelModel::from_dot_vox_model()`: normalizes voxel data into occupancy + bounds.
+  - `VoxelModel::empty_chunk()`: creates a fixed `64x64x64` chunk with hierarchical occupancy storage.
+  - `set_occupancy_bit()`: marks both the chunk region mask and the owning `8x8x8` leaf mask.
 
 ## Where the Vulkan boilerplate lives
 

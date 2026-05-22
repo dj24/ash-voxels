@@ -1,22 +1,4 @@
-uint flatten_index(uint3 position, uint3 dimensions)
-{
-    return position.x + dimensions.x * (position.y + dimensions.y * position.z);
-}
-
-uint chunk_voxel_count(uint3 dimensions)
-{
-    return dimensions.x * dimensions.y * dimensions.z;
-}
-
-uint chunk_occupancy_word_count(uint3 dimensions)
-{
-    return (chunk_voxel_count(dimensions) + OCCUPANCY_WORD_BITS - 1u) / OCCUPANCY_WORD_BITS;
-}
-
-uint object_voxel_word_offset(uint instance_id, uint3 dimensions)
-{
-    return instance_id * chunk_occupancy_word_count(dimensions);
-}
+#include "voxel_hierarchy.hlsl"
 
 float occupancy_at(int3 position, uint3 dimensions, uint instance_id)
 {
@@ -25,12 +7,22 @@ float occupancy_at(int3 position, uint3 dimensions, uint instance_id)
         return 0.0f;
     }
 
-    uint voxel_index = flatten_index(uint3(position), dimensions);
-    uint offset = object_voxel_word_offset(instance_id, dimensions);
-    uint word_index = voxel_index / OCCUPANCY_WORD_BITS;
-    uint bit_index = voxel_index % OCCUPANCY_WORD_BITS;
-    uint word = voxel_occupancy[offset + word_index];
-    return ((word >> bit_index) & 1u) == 0u ? 0.0f : 1.0f;
+    uint3 voxel = uint3(position);
+    uint3 region = uint3(voxel.x >> 3, voxel.y >> 3, voxel.z >> 3);
+    uint region_index = flatten_region_index(region);
+    uint offset = instance_id * CHUNK_OCCUPANCY_WORD_COUNT;
+
+    uint region_word = voxel_occupancy[offset + occupancy_word_index(region_index)];
+    if ((region_word & occupancy_bit_mask(region_index)) == 0u)
+    {
+        return 0.0f;
+    }
+
+    uint3 leaf_local = uint3(voxel.x & 7u, voxel.y & 7u, voxel.z & 7u);
+    uint leaf_index = flatten_leaf_index(leaf_local);
+    uint leaf_word = voxel_occupancy[
+        offset + leaf_mask_word_offset(region_index) + occupancy_word_index(leaf_index)];
+    return (leaf_word & occupancy_bit_mask(leaf_index)) == 0u ? 0.0f : 1.0f;
 }
 
 float3 fallback_normal(float3 direction, int last_axis, int3 step_dir)
@@ -88,7 +80,8 @@ bool intersect_voxel_object(
     RenderObjectData object,
     uint instance_id,
     out float hit_t,
-    out float3 hit_normal)
+    out float3 hit_normal,
+    out uint step_count)
 {
     float3 bounds_min = object.bounds_min.xyz;
     float3 bounds_max = object.bounds_max.xyz;
@@ -100,6 +93,7 @@ bool intersect_voxel_object(
 
     float t_enter;
     float t_exit;
+    step_count = 0u;
     if (!ray_box(origin, direction, bounds_min, bounds_max, ray_t_min, ray_t_max, t_enter, t_exit))
     {
         hit_t = 0.0f;
@@ -133,6 +127,7 @@ bool intersect_voxel_object(
             break;
         }
 
+        step_count += 1u;
         if (occupancy_at(cell, grid_dims, instance_id) > 0.5f)
         {
             float3 gradient = float3(

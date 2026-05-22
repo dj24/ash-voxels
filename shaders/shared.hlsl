@@ -15,9 +15,13 @@ struct RenderObjectData
     float4 voxel_size_and_dimensions;
 };
 
-struct RayPayload
+struct RayData
 {
     float4 color;
+    float3 normal;
+    float ray_t;
+    uint step_count;
+    uint hit;
 };
 
 struct HitAttributes
@@ -37,4 +41,3 @@ static const float PI = 3.1415926535f;
 static const float COARSE_DEPTH_NEAR = 0.1f;
 static const float COARSE_DEPTH_FAR = 1000.0f;
 static const uint TERRAIN_GRID_SIDE = 12u;
-static const uint OCCUPANCY_WORD_BITS = 32u;
