@@ -49,9 +49,10 @@ void coarse_depth_trace_main(uint3 dispatch_id : SV_DispatchThreadID)
         uint instance_id = ray_query.CandidateInstanceID();
         RenderObjectData object = objects[instance_id];
         float candidate_hit_t;
+        float3 candidate_normal;
         uint candidate_step_count;
 
-        if (!intersect_occupied_region_object(
+        if (!intersect_voxel_object(
             ray_query.CandidateObjectRayOrigin(),
             ray_query.CandidateObjectRayDirection(),
             ray.TMin,
@@ -59,6 +60,7 @@ void coarse_depth_trace_main(uint3 dispatch_id : SV_DispatchThreadID)
             object,
             instance_id,
             candidate_hit_t,
+            candidate_normal,
             candidate_step_count))
         {
             continue;
