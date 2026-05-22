@@ -1,9 +1,9 @@
 # Coarse depth as ray start
 * To optimise the start position of rays, a cheap depth prepass runs before tracing
-* Each voxel chunk is drawn depth-only using conservative rasterisation into a 1/4 size depth buffer
-* Mesh shaders can be used to emit vertices from our occupancy array
+* Each voxel chunk is ray traced at 1/8 resolution, using the region occupancy bitfield only
 * The ray gen shader receives this texture as an input
-* Sample the t value from the depth texture and convert to world distance to use as the minT value, instead of a hardcoded 0.001
+* Ray gen shader samples min depth over a 3×3 low-res neighbourhood.
+* Convert to world distance to use as the minT value, instead of a hardcoded 0.001
 
 ## Phase 1
 * Create and render into the depth texture
