@@ -2,7 +2,7 @@ use std::{
     borrow::Cow,
     ffi::{CStr, CString, c_void},
     io::Cursor,
-    mem::{align_of, size_of},
+    mem::size_of,
     path::Path,
 };
 
@@ -32,7 +32,6 @@ const VALIDATION_LAYER: &CStr = c"VK_LAYER_KHRONOS_validation";
 const WINDOWED_DEVICE_EXTENSIONS: &[&CStr] = &[
     ash::khr::swapchain::NAME,
     ash::khr::acceleration_structure::NAME,
-    ash::khr::ray_tracing_pipeline::NAME,
     ash::khr::ray_query::NAME,
     ash::khr::deferred_host_operations::NAME,
     ash::khr::buffer_device_address::NAME,
@@ -43,7 +42,6 @@ const WINDOWED_DEVICE_EXTENSIONS: &[&CStr] = &[
 ];
 const HEADLESS_DEVICE_EXTENSIONS: &[&CStr] = &[
     ash::khr::acceleration_structure::NAME,
-    ash::khr::ray_tracing_pipeline::NAME,
     ash::khr::ray_query::NAME,
     ash::khr::deferred_host_operations::NAME,
     ash::khr::buffer_device_address::NAME,
@@ -59,9 +57,6 @@ const COARSE_DEPTH_DIVISOR: u32 = 4;
 #[derive(Clone, Debug, Resource)]
 pub struct RenderDeviceCaps {
     pub device_name: String,
-    pub shader_group_handle_size: u32,
-    pub shader_group_base_alignment: u32,
-    pub max_ray_recursion_depth: u32,
 }
 
 pub struct Renderer {
@@ -105,9 +100,7 @@ pub struct Renderer {
     coarse_depth_framebuffer: vk::Framebuffer,
     coarse_depth_pipeline: vk::Pipeline,
     coarse_depth_debug_pipeline: vk::Pipeline,
-    sbt: ShaderBindingTable,
     acceleration_loader: ash::khr::acceleration_structure::Device,
-    ray_tracing_pipeline_loader: ash::khr::ray_tracing_pipeline::Device,
     scene_acceleration: SceneAcceleration,
     device_caps: RenderDeviceCaps,
     mode: RendererMode,
@@ -267,8 +260,6 @@ impl Renderer {
             vk::PhysicalDeviceAccelerationStructureFeaturesKHR::default()
                 .acceleration_structure(true)
                 .descriptor_binding_acceleration_structure_update_after_bind(false);
-        let mut ray_tracing_features =
-            vk::PhysicalDeviceRayTracingPipelineFeaturesKHR::default().ray_tracing_pipeline(true);
         let mut ray_query_features =
             vk::PhysicalDeviceRayQueryFeaturesKHR::default().ray_query(true);
 
@@ -276,7 +267,6 @@ impl Renderer {
             .push_next(&mut descriptor_indexing_features)
             .push_next(&mut buffer_device_address_features)
             .push_next(&mut acceleration_structure_features)
-            .push_next(&mut ray_tracing_features)
             .push_next(&mut ray_query_features);
 
         unsafe {
@@ -285,11 +275,10 @@ impl Renderer {
 
         if buffer_device_address_features.buffer_device_address == vk::FALSE
             || acceleration_structure_features.acceleration_structure == vk::FALSE
-            || ray_tracing_features.ray_tracing_pipeline == vk::FALSE
             || ray_query_features.ray_query == vk::FALSE
         {
             return Err(AppError::Message(
-                "Selected GPU does not expose required Vulkan ray tracing features".to_string(),
+                "Selected GPU does not expose the required Vulkan acceleration-structure and ray-query features".to_string(),
             ));
         }
 
@@ -299,8 +288,6 @@ impl Renderer {
             vk::PhysicalDeviceBufferDeviceAddressFeatures::default().buffer_device_address(true);
         let mut device_as = vk::PhysicalDeviceAccelerationStructureFeaturesKHR::default()
             .acceleration_structure(true);
-        let mut device_rt =
-            vk::PhysicalDeviceRayTracingPipelineFeaturesKHR::default().ray_tracing_pipeline(true);
         let mut device_ray_query = vk::PhysicalDeviceRayQueryFeaturesKHR::default().ray_query(true);
 
         let device_info = vk::DeviceCreateInfo::default()
@@ -309,7 +296,6 @@ impl Renderer {
             .push_next(&mut device_descriptor_indexing)
             .push_next(&mut device_bda)
             .push_next(&mut device_as)
-            .push_next(&mut device_rt)
             .push_next(&mut device_ray_query);
 
         let device = unsafe { instance.create_device(physical_device, &device_info, None)? };
@@ -320,25 +306,11 @@ impl Renderer {
             RendererMode::Headless => None,
         };
         let acceleration_loader = ash::khr::acceleration_structure::Device::new(&instance, &device);
-        let ray_tracing_pipeline_loader =
-            ash::khr::ray_tracing_pipeline::Device::new(&instance, &device);
-
-        let mut rt_properties = vk::PhysicalDeviceRayTracingPipelinePropertiesKHR::default();
-        let mut as_properties = vk::PhysicalDeviceAccelerationStructurePropertiesKHR::default();
-        let mut props2 = vk::PhysicalDeviceProperties2::default()
-            .push_next(&mut rt_properties)
-            .push_next(&mut as_properties);
-        unsafe { instance.get_physical_device_properties2(physical_device, &mut props2) };
-
-        let device_name = unsafe { CStr::from_ptr(props2.properties.device_name.as_ptr()) }
+        let properties = unsafe { instance.get_physical_device_properties(physical_device) };
+        let device_name = unsafe { CStr::from_ptr(properties.device_name.as_ptr()) }
             .to_string_lossy()
             .into_owned();
-        let device_caps = RenderDeviceCaps {
-            device_name,
-            shader_group_handle_size: rt_properties.shader_group_handle_size,
-            shader_group_base_alignment: rt_properties.shader_group_base_alignment,
-            max_ray_recursion_depth: rt_properties.max_ray_recursion_depth,
-        };
+        let device_caps = RenderDeviceCaps { device_name };
 
         let command_pool = unsafe {
             device.create_command_pool(
@@ -423,9 +395,7 @@ impl Renderer {
             coarse_depth_framebuffer: vk::Framebuffer::null(),
             coarse_depth_pipeline: vk::Pipeline::null(),
             coarse_depth_debug_pipeline: vk::Pipeline::null(),
-            sbt: ShaderBindingTable::default(),
             acceleration_loader,
-            ray_tracing_pipeline_loader,
             scene_acceleration: SceneAcceleration::default(),
             device_caps,
             mode,
@@ -477,14 +447,9 @@ impl Renderer {
         renderer.scene_acceleration = renderer.create_scene_acceleration(model)?;
         renderer.update_descriptor_set()?;
         renderer.populate_voxel_buffer(model)?;
-        renderer.create_pipeline_and_sbt()?;
+        renderer.create_primary_ray_pipeline()?;
 
-        info!(
-            "Selected device {} (max recursion depth {}, shader group handle size {})",
-            renderer.device_caps.device_name,
-            renderer.device_caps.max_ray_recursion_depth,
-            renderer.device_caps.shader_group_handle_size
-        );
+        info!("Selected device {}", renderer.device_caps.device_name);
 
         Ok(renderer)
     }
@@ -801,46 +766,37 @@ impl Renderer {
                 .binding(0)
                 .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
                 .descriptor_count(1)
-                .stage_flags(vk::ShaderStageFlags::RAYGEN_KHR | vk::ShaderStageFlags::COMPUTE),
+                .stage_flags(vk::ShaderStageFlags::COMPUTE),
             vk::DescriptorSetLayoutBinding::default()
                 .binding(1)
                 .descriptor_type(vk::DescriptorType::ACCELERATION_STRUCTURE_KHR)
                 .descriptor_count(1)
-                .stage_flags(vk::ShaderStageFlags::RAYGEN_KHR),
+                .stage_flags(vk::ShaderStageFlags::COMPUTE),
             vk::DescriptorSetLayoutBinding::default()
                 .binding(2)
                 .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
                 .descriptor_count(1)
-                .stage_flags(vk::ShaderStageFlags::RAYGEN_KHR | vk::ShaderStageFlags::VERTEX),
+                .stage_flags(vk::ShaderStageFlags::COMPUTE | vk::ShaderStageFlags::VERTEX),
             vk::DescriptorSetLayoutBinding::default()
                 .binding(3)
                 .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
                 .descriptor_count(1)
-                .stage_flags(
-                    vk::ShaderStageFlags::VERTEX
-                        | vk::ShaderStageFlags::COMPUTE
-                        | vk::ShaderStageFlags::INTERSECTION_KHR
-                        | vk::ShaderStageFlags::CLOSEST_HIT_KHR,
-                ),
+                .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::COMPUTE),
             vk::DescriptorSetLayoutBinding::default()
                 .binding(4)
                 .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
                 .descriptor_count(1)
-                .stage_flags(
-                    vk::ShaderStageFlags::INTERSECTION_KHR
-                        | vk::ShaderStageFlags::CLOSEST_HIT_KHR
-                        | vk::ShaderStageFlags::COMPUTE,
-                ),
+                .stage_flags(vk::ShaderStageFlags::COMPUTE),
             vk::DescriptorSetLayoutBinding::default()
                 .binding(5)
                 .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
                 .descriptor_count(1)
-                .stage_flags(vk::ShaderStageFlags::COMPUTE | vk::ShaderStageFlags::RAYGEN_KHR),
+                .stage_flags(vk::ShaderStageFlags::COMPUTE),
             vk::DescriptorSetLayoutBinding::default()
                 .binding(6)
                 .descriptor_type(vk::DescriptorType::SAMPLER)
                 .descriptor_count(1)
-                .stage_flags(vk::ShaderStageFlags::COMPUTE | vk::ShaderStageFlags::RAYGEN_KHR),
+                .stage_flags(vk::ShaderStageFlags::COMPUTE),
         ];
 
         self.descriptor_set_layout = unsafe {
@@ -1121,95 +1077,8 @@ impl Renderer {
         })
     }
 
-    fn create_pipeline_and_sbt(&mut self) -> Result<(), AppError> {
-        let stage_defs = [
-            (
-                compiled_shader_artifact("raygen.spv"),
-                c"raygen_main",
-                vk::ShaderStageFlags::RAYGEN_KHR,
-            ),
-            (
-                compiled_shader_artifact("miss.spv"),
-                c"miss_main",
-                vk::ShaderStageFlags::MISS_KHR,
-            ),
-            (
-                compiled_shader_artifact("closesthit.spv"),
-                c"closest_hit_main",
-                vk::ShaderStageFlags::CLOSEST_HIT_KHR,
-            ),
-            (
-                compiled_shader_artifact("intersection.spv"),
-                c"intersection_main",
-                vk::ShaderStageFlags::INTERSECTION_KHR,
-            ),
-        ];
-
-        let mut shader_modules = Vec::new();
-        let mut stages = Vec::new();
-        for (path, entry_name, stage) in stage_defs {
-            let bytes = std::fs::read(&path)?;
-            let code = read_spv(&mut Cursor::new(bytes))
-                .map_err(|error| AppError::Message(error.to_string()))?;
-            let module = unsafe {
-                self.device.create_shader_module(
-                    &vk::ShaderModuleCreateInfo::default().code(&code),
-                    None,
-                )?
-            };
-            shader_modules.push(module);
-            stages.push(
-                vk::PipelineShaderStageCreateInfo::default()
-                    .module(module)
-                    .name(entry_name)
-                    .stage(stage),
-            );
-        }
-
-        let groups = [
-            vk::RayTracingShaderGroupCreateInfoKHR::default()
-                .ty(vk::RayTracingShaderGroupTypeKHR::GENERAL)
-                .general_shader(0)
-                .closest_hit_shader(vk::SHADER_UNUSED_KHR)
-                .any_hit_shader(vk::SHADER_UNUSED_KHR)
-                .intersection_shader(vk::SHADER_UNUSED_KHR),
-            vk::RayTracingShaderGroupCreateInfoKHR::default()
-                .ty(vk::RayTracingShaderGroupTypeKHR::GENERAL)
-                .general_shader(1)
-                .closest_hit_shader(vk::SHADER_UNUSED_KHR)
-                .any_hit_shader(vk::SHADER_UNUSED_KHR)
-                .intersection_shader(vk::SHADER_UNUSED_KHR),
-            vk::RayTracingShaderGroupCreateInfoKHR::default()
-                .ty(vk::RayTracingShaderGroupTypeKHR::PROCEDURAL_HIT_GROUP)
-                .general_shader(vk::SHADER_UNUSED_KHR)
-                .closest_hit_shader(2)
-                .any_hit_shader(vk::SHADER_UNUSED_KHR)
-                .intersection_shader(3),
-        ];
-
-        let pipeline_info = vk::RayTracingPipelineCreateInfoKHR::default()
-            .stages(&stages)
-            .groups(&groups)
-            .max_pipeline_ray_recursion_depth(1)
-            .layout(self.pipeline_layout);
-
-        self.pipeline = unsafe {
-            self.ray_tracing_pipeline_loader
-                .create_ray_tracing_pipelines(
-                    vk::DeferredOperationKHR::null(),
-                    vk::PipelineCache::null(),
-                    &[pipeline_info],
-                    None,
-                )
-                .map_err(|(_, error)| error)?
-        }[0];
-
-        for module in shader_modules {
-            unsafe { self.device.destroy_shader_module(module, None) };
-        }
-
-        self.sbt = self.create_shader_binding_table(groups.len() as u32)?;
-
+    fn create_primary_ray_pipeline(&mut self) -> Result<(), AppError> {
+        self.pipeline = self.create_compute_pipeline("ray_query.spv", c"ray_query_main")?;
         Ok(())
     }
 
@@ -1286,7 +1155,7 @@ impl Renderer {
             renderer.device.cmd_pipeline_barrier(
                 command_buffer,
                 vk::PipelineStageFlags::COMPUTE_SHADER,
-                vk::PipelineStageFlags::RAY_TRACING_SHADER_KHR,
+                vk::PipelineStageFlags::COMPUTE_SHADER,
                 vk::DependencyFlags::empty(),
                 &[vk::MemoryBarrier::default()
                     .src_access_mask(vk::AccessFlags::SHADER_WRITE)
@@ -1302,68 +1171,6 @@ impl Renderer {
         }
 
         Ok(())
-    }
-
-    fn create_shader_binding_table(
-        &mut self,
-        group_count: u32,
-    ) -> Result<ShaderBindingTable, AppError> {
-        let handle_size = self.device_caps.shader_group_handle_size as usize;
-        let handle_alignment = self.device_caps.shader_group_base_alignment as usize;
-        let aligned_handle_size = align_up(handle_size, align_of::<u64>());
-        let region_stride = align_up(aligned_handle_size, handle_alignment);
-
-        let handles = unsafe {
-            self.ray_tracing_pipeline_loader
-                .get_ray_tracing_shader_group_handles(
-                    self.pipeline,
-                    0,
-                    group_count,
-                    handle_size * group_count as usize,
-                )?
-        };
-
-        let mut buffer = self.create_buffer(
-            "shader binding table",
-            (region_stride * group_count as usize) as u64,
-            vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
-                | vk::BufferUsageFlags::SHADER_BINDING_TABLE_KHR,
-            MemoryLocation::CpuToGpu,
-        )?;
-        let mapped = buffer
-            .allocation
-            .as_mut()
-            .and_then(Allocation::mapped_slice_mut)
-            .ok_or_else(|| {
-                AppError::Message("shader binding table buffer is not mapped".to_string())
-            })?;
-        for group in 0..group_count as usize {
-            let src_offset = group * handle_size;
-            let dst_offset = group * region_stride;
-            mapped[dst_offset..dst_offset + handle_size]
-                .copy_from_slice(&handles[src_offset..src_offset + handle_size]);
-        }
-
-        let base_address = self.buffer_device_address(buffer.buffer);
-        let raygen_region = vk::StridedDeviceAddressRegionKHR::default()
-            .device_address(base_address)
-            .stride(region_stride as u64)
-            .size(region_stride as u64);
-        let miss_region = vk::StridedDeviceAddressRegionKHR::default()
-            .device_address(base_address + region_stride as u64)
-            .stride(region_stride as u64)
-            .size(region_stride as u64);
-        let hit_region = vk::StridedDeviceAddressRegionKHR::default()
-            .device_address(base_address + (region_stride * 2) as u64)
-            .stride(region_stride as u64)
-            .size(region_stride as u64);
-
-        Ok(ShaderBindingTable {
-            buffer,
-            raygen_region,
-            miss_region,
-            hit_region,
-        })
     }
 
     fn update_descriptor_set(&mut self) -> Result<(), AppError> {
@@ -1460,7 +1267,7 @@ impl Renderer {
 
     fn record_render_to_output_commands(&mut self) {
         self.record_coarse_depth_prepass_commands();
-        self.record_ray_trace_output_commands();
+        self.record_ray_query_output_commands();
     }
 
     fn record_coarse_depth_prepass_commands(&mut self) {
@@ -1471,7 +1278,7 @@ impl Renderer {
                 vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
             ),
             vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL => (
-                vk::PipelineStageFlags::RAY_TRACING_SHADER_KHR,
+                vk::PipelineStageFlags::COMPUTE_SHADER,
                 vk::AccessFlags::SHADER_READ,
             ),
             _ => (
@@ -1549,7 +1356,7 @@ impl Renderer {
             vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
             vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL,
             vk::PipelineStageFlags::LATE_FRAGMENT_TESTS,
-            vk::PipelineStageFlags::RAY_TRACING_SHADER_KHR,
+            vk::PipelineStageFlags::COMPUTE_SHADER,
             vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
             vk::AccessFlags::SHADER_READ,
             vk::ImageAspectFlags::DEPTH,
@@ -1557,10 +1364,10 @@ impl Renderer {
         self.coarse_depth_image.layout = vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL;
     }
 
-    fn record_ray_trace_output_commands(&mut self) {
+    fn record_ray_query_output_commands(&mut self) {
         let (src_stage, src_access) = match self.output_image.layout {
             vk::ImageLayout::GENERAL => (
-                vk::PipelineStageFlags::RAY_TRACING_SHADER_KHR,
+                vk::PipelineStageFlags::COMPUTE_SHADER,
                 vk::AccessFlags::SHADER_WRITE,
             ),
             vk::ImageLayout::TRANSFER_SRC_OPTIMAL => (
@@ -1580,7 +1387,7 @@ impl Renderer {
             self.output_image.layout,
             vk::ImageLayout::GENERAL,
             src_stage,
-            vk::PipelineStageFlags::RAY_TRACING_SHADER_KHR,
+            vk::PipelineStageFlags::COMPUTE_SHADER,
             src_access,
             vk::AccessFlags::SHADER_WRITE,
             vk::ImageAspectFlags::COLOR,
@@ -1590,25 +1397,21 @@ impl Renderer {
         unsafe {
             self.device.cmd_bind_pipeline(
                 self.command_buffer,
-                vk::PipelineBindPoint::RAY_TRACING_KHR,
+                vk::PipelineBindPoint::COMPUTE,
                 self.pipeline,
             );
             self.device.cmd_bind_descriptor_sets(
                 self.command_buffer,
-                vk::PipelineBindPoint::RAY_TRACING_KHR,
+                vk::PipelineBindPoint::COMPUTE,
                 self.pipeline_layout,
                 0,
                 &[self.descriptor_set],
                 &[],
             );
-            self.ray_tracing_pipeline_loader.cmd_trace_rays(
+            self.device.cmd_dispatch(
                 self.command_buffer,
-                &self.sbt.raygen_region,
-                &self.sbt.miss_region,
-                &self.sbt.hit_region,
-                &vk::StridedDeviceAddressRegionKHR::default(),
-                self.extent.width,
-                self.extent.height,
+                self.extent.width.div_ceil(8),
+                self.extent.height.div_ceil(8),
                 1,
             );
         }
@@ -1619,7 +1422,7 @@ impl Renderer {
             self.output_image.image,
             vk::ImageLayout::GENERAL,
             vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-            vk::PipelineStageFlags::RAY_TRACING_SHADER_KHR,
+            vk::PipelineStageFlags::COMPUTE_SHADER,
             vk::PipelineStageFlags::TRANSFER,
             vk::AccessFlags::SHADER_WRITE,
             vk::AccessFlags::TRANSFER_READ,
@@ -1952,7 +1755,6 @@ impl Renderer {
             image,
             view,
             allocation: Some(allocation),
-            format,
             layout: vk::ImageLayout::UNDEFINED,
         })
     }
@@ -2021,7 +1823,6 @@ impl Renderer {
             image,
             view,
             allocation: Some(allocation),
-            format,
             layout: vk::ImageLayout::UNDEFINED,
         })
     }
@@ -2164,7 +1965,6 @@ impl Renderer {
             image,
             view: vk::ImageView::null(),
             allocation: Some(allocation),
-            format: HEADLESS_CAPTURE_FORMAT,
             layout: vk::ImageLayout::UNDEFINED,
         })
     }
@@ -2438,13 +2238,6 @@ impl Drop for Renderer {
                     .destroy_pipeline_layout(self.pipeline_layout, None);
             }
         }
-        let _ = destroy_buffer_with(
-            &self.device,
-            self.allocator
-                .as_mut()
-                .expect("renderer allocator should exist"),
-            &mut self.sbt.buffer,
-        );
         if self.descriptor_pool != vk::DescriptorPool::null() {
             unsafe {
                 self.device
@@ -2600,14 +2393,6 @@ struct AccelerationStructureResource {
 }
 
 #[derive(Default)]
-struct ShaderBindingTable {
-    buffer: AllocatedBuffer,
-    raygen_region: vk::StridedDeviceAddressRegionKHR,
-    miss_region: vk::StridedDeviceAddressRegionKHR,
-    hit_region: vk::StridedDeviceAddressRegionKHR,
-}
-
-#[derive(Default)]
 struct AllocatedBuffer {
     buffer: vk::Buffer,
     allocation: Option<Allocation>,
@@ -2619,7 +2404,6 @@ struct AllocatedImage {
     image: vk::Image,
     view: vk::ImageView,
     allocation: Option<Allocation>,
-    format: vk::Format,
     layout: vk::ImageLayout,
 }
 
@@ -2646,7 +2430,7 @@ fn pick_physical_device(
 
     candidates.sort_by_key(|(score, _)| *score);
     candidates.pop().map(|(_, device)| device).ok_or_else(|| {
-        AppError::Message("No Vulkan physical device with ray tracing support found".to_string())
+        AppError::Message("No Vulkan physical device with ray query support found".to_string())
     })
 }
 
@@ -2662,7 +2446,7 @@ fn pick_headless_physical_device(instance: &Instance) -> Result<vk::PhysicalDevi
 
     candidates.sort_by_key(|(score, _)| *score);
     candidates.pop().map(|(_, device)| device).ok_or_else(|| {
-        AppError::Message("No Vulkan physical device with ray tracing support found".to_string())
+        AppError::Message("No Vulkan physical device with ray query support found".to_string())
     })
 }
 
@@ -2914,14 +2698,6 @@ fn transition_image(
                         .layer_count(1),
                 )],
         );
-    }
-}
-
-const fn align_up(value: usize, alignment: usize) -> usize {
-    if alignment <= 1 {
-        value
-    } else {
-        value.div_ceil(alignment) * alignment
     }
 }
 

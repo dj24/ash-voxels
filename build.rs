@@ -14,24 +14,9 @@ struct ShaderSpec<'a> {
 
 const SHADERS: &[ShaderSpec<'_>] = &[
     ShaderSpec {
-        file_name: "raygen.hlsl",
-        entry_point: "raygen_main",
-        profile: "lib_6_3",
-    },
-    ShaderSpec {
-        file_name: "miss.hlsl",
-        entry_point: "miss_main",
-        profile: "lib_6_3",
-    },
-    ShaderSpec {
-        file_name: "closesthit.hlsl",
-        entry_point: "closest_hit_main",
-        profile: "lib_6_3",
-    },
-    ShaderSpec {
-        file_name: "intersection.hlsl",
-        entry_point: "intersection_main",
-        profile: "lib_6_3",
+        file_name: "ray_query.hlsl",
+        entry_point: "ray_query_main",
+        profile: "cs_6_5",
     },
     ShaderSpec {
         file_name: "terrain_gen.hlsl",

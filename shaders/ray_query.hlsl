@@ -1,4 +1,5 @@
 #include "shared.hlsl"
+#include "voxel_intersection.hlsl"
 
 uint glyph_mask(int glyph)
 {
@@ -121,11 +122,84 @@ float coarse_depth_to_linear_distance(float depth)
         / (COARSE_DEPTH_FAR - depth * (COARSE_DEPTH_FAR - COARSE_DEPTH_NEAR));
 }
 
-[shader("raygeneration")]
-void raygen_main()
+float4 shade_sky(float3 direction)
 {
-    uint2 launch_index = DispatchRaysIndex().xy;
-    uint2 launch_size = DispatchRaysDimensions().xy;
+    float sky = 0.5f * (direction.y + 1.0f);
+    float3 color = lerp(float3(0.12f, 0.15f, 0.2f), float3(0.65f, 0.75f, 0.95f), sky);
+    return float4(color, 1.0f);
+}
+
+float4 shade_voxel(float3 normal)
+{
+    float3 light_direction = normalize(float3(0.45f, 0.8f, 0.35f));
+    float ndotl = saturate(dot(normalize(normal), light_direction));
+    float diffuse = 0.15f + ndotl * 0.85f;
+    float3 albedo = float3(0.34f, 0.52f, 0.28f);
+    return float4(albedo * diffuse, 1.0f);
+}
+
+struct VoxelHit
+{
+    bool hit;
+    float ray_t;
+    float3 normal;
+};
+
+VoxelHit trace_voxel_scene(RayDesc ray)
+{
+    VoxelHit best_hit;
+    best_hit.hit = false;
+    best_hit.ray_t = ray.TMax;
+    best_hit.normal = float3(0.0f, 1.0f, 0.0f);
+
+    RayQuery<RAY_FLAG_NONE> ray_query;
+    ray_query.TraceRayInline(scene_acceleration, RAY_FLAG_NONE, 0xFF, ray);
+
+    [loop]
+    while (ray_query.Proceed())
+    {
+        if (ray_query.CandidateType() != CANDIDATE_PROCEDURAL_PRIMITIVE)
+        {
+            continue;
+        }
+
+        uint instance_id = ray_query.CandidateInstanceID();
+        RenderObjectData object = objects[instance_id];
+        float candidate_hit_t;
+        float3 candidate_normal;
+
+        if (!intersect_voxel_object(
+            ray_query.CandidateObjectRayOrigin(),
+            ray_query.CandidateObjectRayDirection(),
+            ray.TMin,
+            ray_query.CommittedRayT(),
+            object,
+            instance_id,
+            candidate_hit_t,
+            candidate_normal))
+        {
+            continue;
+        }
+
+        ray_query.CommitProceduralPrimitiveHit(candidate_hit_t);
+        best_hit.hit = true;
+        best_hit.ray_t = candidate_hit_t;
+        best_hit.normal = candidate_normal;
+    }
+
+    return best_hit;
+}
+
+[numthreads(8, 8, 1)]
+void ray_query_main(uint3 dispatch_id : SV_DispatchThreadID)
+{
+    uint2 launch_size = uint2(scene_uniform.viewport.xy);
+    uint2 launch_index = dispatch_id.xy;
+    if (launch_index.x >= launch_size.x || launch_index.y >= launch_size.y)
+    {
+        return;
+    }
+
     float2 pixel_center = (float2(launch_index) + 0.5f) / float2(launch_size);
     float2 ndc = pixel_center * 2.0f - 1.0f;
     ndc.y = -ndc.y;
@@ -141,6 +215,7 @@ void raygen_main()
     RayDesc ray;
     ray.Origin = scene_uniform.camera_position.xyz;
     ray.Direction = ray_direction;
+    ray.TMin = 0.001f;
     ray.TMax = 1000.0f;
 
     float depth = coarse_depth_texture.SampleLevel(coarse_depth_sampler, pixel_center, 0.0f);
@@ -150,23 +225,8 @@ void raygen_main()
         float linear_depth = coarse_depth_to_linear_distance(depth);
         ray.TMin = clamp(linear_depth - coarse_depth_bias, 0.001f, ray.TMax - 0.001f);
     }
-    else
-    {
-        ray.TMin = 0.001f;
-    }
 
-    RayPayload payload;
-    payload.color = float4(0.0f, 0.0f, 0.0f, 1.0f);
-
-    TraceRay(
-        scene_acceleration,
-        RAY_FLAG_NONE,
-        0xFF,
-        0,
-        0,
-        0,
-        ray,
-        payload);
-
-    output_image[launch_index] = overlay_fps_counter(launch_index, launch_size, payload.color);
+    VoxelHit hit = trace_voxel_scene(ray);
+    float4 color = hit.hit ? shade_voxel(hit.normal) : shade_sky(ray_direction);
+    output_image[launch_index] = overlay_fps_counter(launch_index, launch_size, color);
 }

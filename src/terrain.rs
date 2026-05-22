@@ -83,7 +83,10 @@ mod tests {
         let model = procedural_chunk_model();
 
         assert_eq!(model.dimensions, TERRAIN_CHUNK_DIMENSIONS);
-        assert_eq!(model.occupancy.len(), occupancy_word_len(TERRAIN_CHUNK_DIMENSIONS));
+        assert_eq!(
+            model.occupancy.len(),
+            occupancy_word_len(TERRAIN_CHUNK_DIMENSIONS)
+        );
         assert_eq!(model.voxel_size, TERRAIN_CHUNK_VOXEL_SIZE);
         assert_eq!(model.bounds_min.y, 0.0);
         assert_eq!(

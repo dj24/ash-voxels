@@ -13,7 +13,7 @@ Prototype Vulkan voxel renderer built directly on `ash`, with a small Bevy ECS a
 - `src/render/mod.rs`: the renderer and almost all Vulkan-specific code.
 - `src/shader_build.rs`: runtime helpers for locating compiled shader artifacts in `OUT_DIR`.
 - `src/vk.rs`: shared `AppError` type for Vulkan and app errors.
-- `shaders/`: HLSL sources for ray tracing, terrain generation, and coarse depth passes.
+- `shaders/`: HLSL sources for the ray-query compute pass, terrain generation, and coarse depth passes.
 - `build.rs`: shader compilation step that invokes `dxc` and emits `.spv` files into Cargo's output directory.
 - `tests/shader_artifacts.rs`: checks that the build produced the shader artifacts the renderer expects.
 - `plans/`: design notes and experiments.
@@ -60,8 +60,8 @@ Most of the Vulkan setup is concentrated in `src/render/mod.rs`.
 - `pick_physical_device()`, `pick_headless_physical_device()`, `pick_queue_family()`, `pick_graphics_queue_family()`: GPU and queue selection.
 - `recreate_swapchain()`: windowed presentation setup and resize handling.
 - `create_descriptor_resources()`: descriptor pool, set layout, and descriptor set allocation.
-- `create_scene_acceleration()`: BLAS/TLAS setup for ray tracing.
-- `create_pipeline_and_sbt()`: ray tracing pipeline creation plus shader binding table setup.
+- `create_scene_acceleration()`: BLAS/TLAS setup for ray queries over the procedural voxel AABBs.
+- `create_primary_ray_pipeline()`: compute pipeline creation for the primary-ray ray-query pass.
 - `create_coarse_depth_shared_resources()` and `recreate_coarse_depth_targets()`: support resources for the coarse depth path.
 - `run_compute_shader()`: generic helper used by terrain generation.
 - `render()`: frame submission for the windowed renderer.
@@ -72,7 +72,7 @@ If you want to understand the renderer quickly, start with:
 1. `Renderer::new_internal()`
 2. `Renderer::render()`
 3. `Renderer::create_scene_acceleration()`
-4. `Renderer::create_pipeline_and_sbt()`
+4. `Renderer::create_primary_ray_pipeline()`
 
 ## Shaders
 
