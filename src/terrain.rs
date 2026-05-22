@@ -8,8 +8,10 @@ use crate::{
 
 pub const TERRAIN_CHUNK_DIMENSIONS: UVec3 = CHUNK_DIMENSIONS;
 pub const TERRAIN_CHUNK_VOXEL_SIZE: f32 = 0.25;
-pub const TERRAIN_GRID_SIDE: usize = 12;
-pub const TERRAIN_GRID_COUNT: usize = TERRAIN_GRID_SIDE * TERRAIN_GRID_SIDE;
+pub const TERRAIN_GRID_SIDE: usize = 24;
+pub const TERRAIN_GRID_HEIGHT_LAYERS: usize = 4;
+pub const TERRAIN_GRID_COUNT: usize =
+    TERRAIN_GRID_SIDE * TERRAIN_GRID_SIDE * TERRAIN_GRID_HEIGHT_LAYERS;
 
 pub fn procedural_chunk_model() -> VoxelModel {
     let dimensions = TERRAIN_CHUNK_DIMENSIONS;
@@ -30,17 +32,20 @@ pub fn procedural_chunk_model() -> VoxelModel {
 
 pub fn terrain_grid_positions(tile_extent: Vec3) -> Vec<Vec3> {
     let x_spacing = tile_extent.x.max(0.001);
+    let y_spacing = tile_extent.y.max(0.001);
     let z_spacing = tile_extent.z.max(0.001);
     let half_extent_x = (TERRAIN_GRID_SIDE as f32 - 1.0) * x_spacing * 0.5;
     let half_extent_z = (TERRAIN_GRID_SIDE as f32 - 1.0) * z_spacing * 0.5;
     let mut positions = Vec::with_capacity(TERRAIN_GRID_COUNT);
-    for z in 0..TERRAIN_GRID_SIDE {
-        for x in 0..TERRAIN_GRID_SIDE {
-            positions.push(Vec3::new(
-                x as f32 * x_spacing - half_extent_x,
-                0.0,
-                z as f32 * z_spacing - half_extent_z,
-            ));
+    for y in 0..TERRAIN_GRID_HEIGHT_LAYERS {
+        for z in 0..TERRAIN_GRID_SIDE {
+            for x in 0..TERRAIN_GRID_SIDE {
+                positions.push(Vec3::new(
+                    x as f32 * x_spacing - half_extent_x,
+                    y as f32 * y_spacing,
+                    z as f32 * z_spacing - half_extent_z,
+                ));
+            }
         }
     }
     positions
@@ -71,7 +76,7 @@ mod tests {
 
     use super::{
         TERRAIN_CHUNK_DIMENSIONS, TERRAIN_CHUNK_VOXEL_SIZE, TERRAIN_GRID_COUNT,
-        procedural_chunk_model, terrain_grid_positions,
+        TERRAIN_GRID_HEIGHT_LAYERS, procedural_chunk_model, terrain_grid_positions,
     };
     use crate::assets::CHUNK_OCCUPANCY_WORD_COUNT;
 
@@ -94,10 +99,11 @@ mod tests {
         let positions = terrain_grid_positions(Vec3::new(4.0, 1.0, 6.0));
 
         assert_eq!(positions.len(), TERRAIN_GRID_COUNT);
+        assert_eq!(TERRAIN_GRID_HEIGHT_LAYERS, 4);
         assert_eq!(
             positions.first().copied(),
-            Some(Vec3::new(-22.0, 0.0, -33.0))
+            Some(Vec3::new(-46.0, 0.0, -69.0))
         );
-        assert_eq!(positions.last().copied(), Some(Vec3::new(22.0, 0.0, 33.0)));
+        assert_eq!(positions.last().copied(), Some(Vec3::new(46.0, 3.0, 69.0)));
     }
 }

@@ -39,9 +39,14 @@ fn main() {
     let manifest_dir =
         PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
     let shader_dir = manifest_dir.join("shaders");
+    let terrain_source = manifest_dir.join("src").join("terrain.rs");
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR")).join("shaders");
+    let terrain_grid_side = read_terrain_constant(&terrain_source, "TERRAIN_GRID_SIDE");
+    let terrain_grid_height_layers =
+        read_terrain_constant(&terrain_source, "TERRAIN_GRID_HEIGHT_LAYERS");
 
     println!("cargo:rerun-if-changed={}", shader_dir.display());
+    println!("cargo:rerun-if-changed={}", terrain_source.display());
     fs::create_dir_all(&out_dir).expect("create shader output directory");
 
     let dxc =
@@ -50,6 +55,9 @@ fn main() {
     for shader in SHADERS {
         let source = shader_dir.join(shader.file_name);
         let output = out_dir.join(Path::new(shader.file_name).with_extension("spv"));
+        let terrain_grid_side_define = format!("TERRAIN_GRID_SIDE_VALUE={terrain_grid_side}");
+        let terrain_grid_height_layers_define =
+            format!("TERRAIN_GRID_HEIGHT_LAYERS_VALUE={terrain_grid_height_layers}");
 
         let status = Command::new(&dxc)
             .args([
@@ -61,6 +69,10 @@ fn main() {
                 OsStr::new("-fspv-target-env=vulkan1.3"),
                 OsStr::new("-I"),
                 shader_dir.as_os_str(),
+                OsStr::new("-D"),
+                OsStr::new(&terrain_grid_side_define),
+                OsStr::new("-D"),
+                OsStr::new(&terrain_grid_height_layers_define),
                 OsStr::new("-Fo"),
                 output.as_os_str(),
                 source.as_os_str(),
@@ -88,5 +100,39 @@ fn find_dxc() -> Option<PathBuf> {
         env::split_paths(&path)
             .map(|dir| dir.join(if cfg!(windows) { "dxc.exe" } else { "dxc" }))
             .find(|candidate| candidate.exists())
+    })
+}
+
+fn read_terrain_constant(terrain_source: &Path, constant_name: &str) -> u32 {
+    let source = fs::read_to_string(terrain_source)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", terrain_source.display()));
+
+    let line = source
+        .lines()
+        .find(|line| line.contains(&format!("pub const {constant_name}")))
+        .unwrap_or_else(|| {
+            panic!(
+                "failed to find {constant_name} constant in {}",
+                terrain_source.display(),
+            )
+        });
+
+    let value = line
+        .split('=')
+        .nth(1)
+        .map(str::trim)
+        .and_then(|value| value.strip_suffix(';'))
+        .unwrap_or_else(|| {
+            panic!(
+                "failed to parse {constant_name} constant from line `{line}` in {}",
+                terrain_source.display()
+            )
+        });
+
+    value.parse::<u32>().unwrap_or_else(|error| {
+        panic!(
+            "failed to parse {constant_name} value `{value}` in {}: {error}",
+            terrain_source.display()
+        )
     })
 }

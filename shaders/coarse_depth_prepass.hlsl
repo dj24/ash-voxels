@@ -22,14 +22,17 @@ static const uint BOX_INDICES[36] = {
 
 float3 terrain_grid_translation(uint instance_id, float3 extent)
 {
-    uint grid_x = instance_id % TERRAIN_GRID_SIDE;
-    uint grid_z = instance_id / TERRAIN_GRID_SIDE;
+    uint chunks_per_layer = TERRAIN_GRID_SIDE * TERRAIN_GRID_SIDE;
+    uint grid_y = instance_id / chunks_per_layer;
+    uint layer_offset = instance_id % chunks_per_layer;
+    uint grid_x = layer_offset % TERRAIN_GRID_SIDE;
+    uint grid_z = layer_offset / TERRAIN_GRID_SIDE;
     float half_extent_x = (TERRAIN_GRID_SIDE - 1u) * extent.x * 0.5f;
     float half_extent_z = (TERRAIN_GRID_SIDE - 1u) * extent.z * 0.5f;
 
     return float3(
         (float)grid_x * extent.x - half_extent_x,
-        0.0f,
+        (float)grid_y * extent.y,
         (float)grid_z * extent.z - half_extent_z);
 }
 

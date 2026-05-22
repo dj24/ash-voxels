@@ -40,4 +40,14 @@ struct HitAttributes
 static const float PI = 3.1415926535f;
 static const float COARSE_DEPTH_NEAR = 0.1f;
 static const float COARSE_DEPTH_FAR = 1000.0f;
-static const uint TERRAIN_GRID_SIDE = 12u;
+
+#ifndef TERRAIN_GRID_SIDE_VALUE
+#define TERRAIN_GRID_SIDE_VALUE 12
+#endif
+
+#ifndef TERRAIN_GRID_HEIGHT_LAYERS_VALUE
+#define TERRAIN_GRID_HEIGHT_LAYERS_VALUE 1
+#endif
+
+static const uint TERRAIN_GRID_SIDE = TERRAIN_GRID_SIDE_VALUE;
+static const uint TERRAIN_GRID_HEIGHT_LAYERS = TERRAIN_GRID_HEIGHT_LAYERS_VALUE;

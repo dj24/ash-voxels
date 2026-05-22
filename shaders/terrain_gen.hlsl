@@ -11,7 +11,16 @@ struct RenderObjectData
 [[vk::binding(3, 0)]] StructuredBuffer<RenderObjectData> objects;
 [[vk::binding(4, 0)]] RWStructuredBuffer<uint> voxel_occupancy;
 
-static const uint TERRAIN_GRID_SIDE = 12u;
+#ifndef TERRAIN_GRID_SIDE_VALUE
+#define TERRAIN_GRID_SIDE_VALUE 12
+#endif
+
+#ifndef TERRAIN_GRID_HEIGHT_LAYERS_VALUE
+#define TERRAIN_GRID_HEIGHT_LAYERS_VALUE 1
+#endif
+
+static const uint TERRAIN_GRID_SIDE = TERRAIN_GRID_SIDE_VALUE;
+static const uint TERRAIN_GRID_HEIGHT_LAYERS = TERRAIN_GRID_HEIGHT_LAYERS_VALUE;
 static const uint THREADS_X = 8u;
 static const uint THREADS_Y = 4u;
 static const uint THREADS_Z = 8u;
@@ -24,19 +33,25 @@ uint3 terrain_dimensions()
         max(1, (int)objects[0].voxel_size_and_dimensions.w));
 }
 
-int2 terrain_tile_coordinates(uint chunk_index)
+uint3 terrain_chunk_coordinates(uint chunk_index)
 {
-    return int2(chunk_index % TERRAIN_GRID_SIDE, chunk_index / TERRAIN_GRID_SIDE);
+    uint chunks_per_layer = TERRAIN_GRID_SIDE * TERRAIN_GRID_SIDE;
+    uint layer = chunk_index / chunks_per_layer;
+    uint layer_offset = chunk_index % chunks_per_layer;
+    return uint3(
+        layer_offset % TERRAIN_GRID_SIDE,
+        layer,
+        layer_offset / TERRAIN_GRID_SIDE);
 }
 
-static const float FREQUENCY_MULTIPLIER = 0.5;
+static const float FREQUENCY_MULTIPLIER = 0.2;
 
 float terrain_surface_height(int2 position, uint3 dimensions, uint chunk_index)
 {
-    int2 tile = terrain_tile_coordinates(chunk_index);
+    uint3 chunk = terrain_chunk_coordinates(chunk_index);
     float2 world_position = float2(
-        tile.x * (int)dimensions.x + position.x,
-        tile.y * (int)dimensions.z + position.y);
+        (int)chunk.x * (int)dimensions.x + position.x,
+        (int)chunk.z * (int)dimensions.z + position.y);
     world_position -= float2(
         (float)(TERRAIN_GRID_SIDE * dimensions.x),
         (float)(TERRAIN_GRID_SIDE * dimensions.z)) * 0.5f;
@@ -71,7 +86,7 @@ float terrain_surface_height(int2 position, uint3 dimensions, uint chunk_index)
 
     float plateau = saturate(fnlGetNoise2D(broad_shape, sample_x, sample_y) * 0.5f + 0.5f);
     float erosion = 1.0f - abs(fnlGetNoise2D(detail_shape, sample_x, sample_y));
-    float max_height = max((float)dimensions.y - 2.0f, 1.0f);
+    float max_height = max((float)(dimensions.y * TERRAIN_GRID_HEIGHT_LAYERS) - 2.0f, 1.0f);
 
     return clamp(2.0f + plateau * (max_height - 3.0f) + erosion * 2.5f, 1.0f, max_height);
 }
@@ -81,7 +96,7 @@ void terrain_gen_main(uint3 dispatch_id : SV_DispatchThreadID)
 {
     uint3 dimensions = terrain_dimensions();
     uint chunk_index = dispatch_id.z / dimensions.z;
-    if (chunk_index >= TERRAIN_GRID_SIDE * TERRAIN_GRID_SIDE)
+    if (chunk_index >= TERRAIN_GRID_SIDE * TERRAIN_GRID_SIDE * TERRAIN_GRID_HEIGHT_LAYERS)
     {
         return;
     }
@@ -99,8 +114,10 @@ void terrain_gen_main(uint3 dispatch_id : SV_DispatchThreadID)
     uint leaf_index = flatten_leaf_index(leaf_local);
     uint word_offset = chunk_index * CHUNK_OCCUPANCY_WORD_COUNT;
     float surface_height = terrain_surface_height(int2(local.x, local.z), dimensions, chunk_index);
+    uint chunk_layer = terrain_chunk_coordinates(chunk_index).y;
+    float global_y = (float)(chunk_layer * dimensions.y + local.y);
 
-    if ((float)local.y <= surface_height)
+    if (global_y <= surface_height)
     {
         InterlockedOr(
             voxel_occupancy[word_offset + occupancy_word_index(region_index)],
