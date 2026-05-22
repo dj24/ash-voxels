@@ -253,11 +253,11 @@ void ray_query_main(uint3 dispatch_id : SV_DispatchThreadID)
 
     float depth = coarse_depth_texture.SampleLevel(coarse_depth_sampler, pixel_center, 0.0f);
     float coarse_depth_bias = 0.5f;
-    if (depth < 1.0f)
-    {
-        float linear_depth = coarse_depth_to_linear_distance(depth);
-        ray.TMin = clamp(linear_depth - coarse_depth_bias, 0.001f, ray.TMax - 0.001f);
-    }
+//     if (depth < 1.0f)
+//     {
+//         float linear_depth = coarse_depth_to_linear_distance(depth);
+//         ray.TMin = clamp(linear_depth - coarse_depth_bias, 0.001f, ray.TMax - 0.001f);
+//     }
 
     RayData ray_data = trace_voxel_scene(ray);
     float4 debug_color = shade_ray_complexity(ray_data.color, ray_data.step_count);

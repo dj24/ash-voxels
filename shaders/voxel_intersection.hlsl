@@ -1,8 +1,23 @@
 #include "voxel_hierarchy.hlsl"
 
-float occupancy_at(int3 position, uint3 dimensions, uint instance_id)
+bool region_occupancy_at(int3 position, uint3 dimensions, uint instance_id)
 {
     if (any(position < 0) || any(position >= int3(dimensions)))
+    {
+        return false;
+    }
+
+    uint3 voxel = uint3(position);
+    uint3 region = uint3(voxel.x >> 3, voxel.y >> 3, voxel.z >> 3);
+    uint region_index = flatten_region_index(region);
+    uint offset = instance_id * CHUNK_OCCUPANCY_WORD_COUNT;
+    uint region_word = voxel_occupancy[offset + occupancy_word_index(region_index)];
+    return (region_word & occupancy_bit_mask(region_index)) != 0u;
+}
+
+float occupancy_at(int3 position, uint3 dimensions, uint instance_id)
+{
+    if (!region_occupancy_at(position, dimensions, instance_id))
     {
         return 0.0f;
     }
@@ -11,18 +26,26 @@ float occupancy_at(int3 position, uint3 dimensions, uint instance_id)
     uint3 region = uint3(voxel.x >> 3, voxel.y >> 3, voxel.z >> 3);
     uint region_index = flatten_region_index(region);
     uint offset = instance_id * CHUNK_OCCUPANCY_WORD_COUNT;
-
-    uint region_word = voxel_occupancy[offset + occupancy_word_index(region_index)];
-    if ((region_word & occupancy_bit_mask(region_index)) == 0u)
-    {
-        return 0.0f;
-    }
-
     uint3 leaf_local = uint3(voxel.x & 7u, voxel.y & 7u, voxel.z & 7u);
     uint leaf_index = flatten_leaf_index(leaf_local);
     uint leaf_word = voxel_occupancy[
         offset + leaf_mask_word_offset(region_index) + occupancy_word_index(leaf_index)];
     return (leaf_word & occupancy_bit_mask(leaf_index)) == 0u ? 0.0f : 1.0f;
+}
+
+void rebuild_dda_state(
+    float3 origin,
+    float3 direction,
+    float3 bounds_min,
+    float voxel_size,
+    int3 cell,
+    out float3 t_max)
+{
+    float3 next_boundary = bounds_min + (float3(cell) + float3(direction >= 0.0f)) * voxel_size;
+    t_max = float3(
+        abs(direction.x) > 1e-5f ? (next_boundary.x - origin.x) / direction.x : 1e30f,
+        abs(direction.y) > 1e-5f ? (next_boundary.y - origin.y) / direction.y : 1e30f,
+        abs(direction.z) > 1e-5f ? (next_boundary.z - origin.z) / direction.z : 1e30f);
 }
 
 float3 fallback_normal(float3 direction, int last_axis, int3 step_dir)
@@ -111,13 +134,11 @@ bool intersect_voxel_object(
         direction.y >= 0.0f ? 1 : -1,
         direction.z >= 0.0f ? 1 : -1);
 
-    float3 next_boundary = bounds_min + (float3(cell) + float3(step_dir > 0)) * voxel_size;
-    float3 t_max = float3(
-        abs(direction.x) > 1e-5f ? (next_boundary.x - origin.x) / direction.x : 1e30f,
-        abs(direction.y) > 1e-5f ? (next_boundary.y - origin.y) / direction.y : 1e30f,
-        abs(direction.z) > 1e-5f ? (next_boundary.z - origin.z) / direction.z : 1e30f);
+    float3 t_max;
+    rebuild_dda_state(origin, direction, bounds_min, voxel_size, cell, t_max);
     float3 t_delta = abs(voxel_size / max(abs(direction), 1e-5f));
     int last_axis = -1;
+    float advance_epsilon = voxel_size * 0.5f;
 
     [loop]
     for (uint step_index = 0; step_index < 512; ++step_index)
@@ -128,6 +149,68 @@ bool intersect_voxel_object(
         }
 
         step_count += 1u;
+        if (!region_occupancy_at(cell, grid_dims, instance_id))
+        {
+            int3 region = int3(cell.x >> 3, cell.y >> 3, cell.z >> 3);
+            int3 region_local = int3(cell.x & 7, cell.y & 7, cell.z & 7);
+            int3 steps_to_region_exit = int3(
+                step_dir.x > 0 ? 8 - region_local.x : region_local.x + 1,
+                step_dir.y > 0 ? 8 - region_local.y : region_local.y + 1,
+                step_dir.z > 0 ? 8 - region_local.z : region_local.z + 1);
+
+            float3 t_region_exit = t_max + float3(
+                (steps_to_region_exit.x - 1) * t_delta.x,
+                (steps_to_region_exit.y - 1) * t_delta.y,
+                (steps_to_region_exit.z - 1) * t_delta.z);
+
+            if (t_region_exit.x < t_region_exit.y && t_region_exit.x < t_region_exit.z)
+            {
+                t_enter = t_region_exit.x;
+                last_axis = 0;
+            }
+            else if (t_region_exit.y < t_region_exit.z)
+            {
+                t_enter = t_region_exit.y;
+                last_axis = 1;
+            }
+            else
+            {
+                t_enter = t_region_exit.z;
+                last_axis = 2;
+            }
+
+            if (t_enter > t_exit || t_enter > ray_t_max)
+            {
+                break;
+            }
+
+            float travel_t = min(t_enter + advance_epsilon, t_exit);
+            float3 advanced_point = clamp(
+                origin + direction * travel_t,
+                bounds_min,
+                bounds_max - 1e-4f);
+            float3 advanced_relative = saturate(
+                (advanced_point - bounds_min) / max(extent, float3(1e-5f, 1e-5f, 1e-5f)));
+            cell = min(int3(advanced_relative * float3(grid_dims)), int3(grid_dims) - 1);
+            if (all(region == int3(cell.x >> 3, cell.y >> 3, cell.z >> 3)))
+            {
+                if (last_axis == 0)
+                {
+                    cell.x += step_dir.x * steps_to_region_exit.x;
+                }
+                else if (last_axis == 1)
+                {
+                    cell.y += step_dir.y * steps_to_region_exit.y;
+                }
+                else
+                {
+                    cell.z += step_dir.z * steps_to_region_exit.z;
+                }
+            }
+            rebuild_dda_state(origin, direction, bounds_min, voxel_size, cell, t_max);
+            continue;
+        }
+
         if (occupancy_at(cell, grid_dims, instance_id) > 0.5f)
         {
             float3 gradient = float3(
