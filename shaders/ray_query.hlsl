@@ -132,6 +132,106 @@ float4 shade_voxel(float3 normal)
     return float4(albedo * diffuse, 1.0f);
 }
 
+
+float hash01(uint2 p)
+{
+    uint x = p.x * 1664525u + 1013904223u;
+    uint y = p.y * 22695477u + 1u;
+    uint n = x ^ (y << 16) ^ (x >> 13);
+    n ^= n * 1274126177u;
+    return (float)(n & 0x00FFFFFFu) / 16777215.0f;
+}
+
+float3 tangent_from_normal(float3 n)
+{
+    float3 up = abs(n.y) < 0.999f ? float3(0.0f, 1.0f, 0.0f) : float3(1.0f, 0.0f, 0.0f);
+    return normalize(cross(up, n));
+}
+
+float3 sample_hemisphere(float3 normal, float2 rand)
+{
+    float phi = rand.x * 6.2831853f;
+    float cos_theta = sqrt(1.0f - rand.y);
+    float sin_theta = sqrt(rand.y);
+
+    float3 tangent = tangent_from_normal(normal);
+    float3 bitangent = cross(normal, tangent);
+    float3 local = float3(cos(phi) * sin_theta, cos_theta, sin(phi) * sin_theta);
+    return normalize(local.x * tangent + local.y * normal + local.z * bitangent);
+}
+
+
+
+static const uint REGIR_MIP_COUNT = 3u;
+static const float REGIR_CELL_SIZE[REGIR_MIP_COUNT] = {4.0f, 16.0f, 64.0f};
+
+uint regir_cell_hash(int3 cell, uint mip)
+{
+    uint h = (uint)(cell.x * 73856093) ^ (uint)(cell.y * 19349663) ^ (uint)(cell.z * 83492791) ^ (mip * 2654435761u);
+    h ^= h >> 13;
+    h *= 1274126177u;
+    return h;
+}
+
+bool regir_visibility_bit(int3 cell, uint mip)
+{
+    // Prototype occupancy bitfield stand-in until the dedicated visibility buffers are bound.
+    // Keeps deterministic sparse updates similar to bit-packed visibility sampling.
+    return (regir_cell_hash(cell, mip) & 7u) == 0u;
+}
+
+float regir_mip_weight(float distance, uint mip)
+{
+    float next_cell = mip + 1u < REGIR_MIP_COUNT ? REGIR_CELL_SIZE[mip + 1u] : REGIR_CELL_SIZE[mip] * 4.0f;
+    return saturate((distance - REGIR_CELL_SIZE[mip]) / max(next_cell - REGIR_CELL_SIZE[mip], 1.0f));
+}
+
+float3 sample_naive_regir(float3 hit_position, float3 normal, uint2 launch_index)
+{
+    float3 accumulated = 0.0f.xxx;
+    float accumulated_weight = 0.0f;
+
+    [unroll]
+    for (uint mip = 0u; mip < REGIR_MIP_COUNT; ++mip)
+    {
+        float cell_size = REGIR_CELL_SIZE[mip];
+        int3 cell = int3(floor(hit_position / cell_size));
+        if (!regir_visibility_bit(cell, mip))
+        {
+            continue;
+        }
+
+        float r0 = hash01(launch_index + uint2(17u * (mip + 1u), 23u));
+        float r1 = hash01(launch_index + uint2(29u, 31u * (mip + 1u)));
+        float3 bounce_dir = sample_hemisphere(normal, float2(r0, r1));
+
+        RayDesc bounce_ray;
+        bounce_ray.Origin = hit_position + normal * 0.03f;
+        bounce_ray.Direction = bounce_dir;
+        bounce_ray.TMin = 0.001f;
+        bounce_ray.TMax = cell_size * 16.0f;
+
+        RayData bounce_hit = trace_voxel_scene(bounce_ray);
+        float3 bounce_radiance = bounce_hit.color.rgb;
+
+        RayDesc sun_ray;
+        sun_ray.Origin = bounce_ray.Origin;
+        sun_ray.Direction = normalize(float3(0.45f, 0.8f, 0.35f));
+        sun_ray.TMin = 0.001f;
+        sun_ray.TMax = 1000.0f;
+        RayData sun_hit = trace_voxel_scene(sun_ray);
+        float sun_visible = sun_hit.hit == 0u ? 1.0f : 0.0f;
+        bounce_radiance += bounce_radiance * float3(1.0f, 0.95f, 0.86f) * (0.1f + 0.3f * sun_visible);
+
+        float distance_to_cell = length((float3(cell) + 0.5f) * cell_size - hit_position);
+        float w = lerp(1.0f, 0.35f, regir_mip_weight(distance_to_cell, mip));
+        accumulated += bounce_radiance * w;
+        accumulated_weight += w;
+    }
+
+    return accumulated_weight > 0.0f ? accumulated / accumulated_weight : 0.0f.xxx;
+}
+
 float3 heatmap_ramp(float t)
 {
     float3 cool = float3(0.04f, 0.05f, 0.08f);
@@ -292,7 +392,17 @@ void ray_query_main(uint3 dispatch_id : SV_DispatchThreadID)
     ray.TMin = clamp(depth - coarse_depth_bias, 0.001f, ray.TMax - 0.001f);
 
     RayData ray_data = trace_voxel_scene(ray);
-    float4 debug_color = shade_ray_complexity(ray_data.color, ray_data.step_count);
-    output_image[launch_index] = overlay_fps_counter(launch_index, launch_size, ray_data.color);
+    float4 shaded = ray_data.color;
+
+    if (ray_data.hit != 0u)
+    {
+        float3 hit_position = ray.Origin + ray.Direction * ray_data.ray_t;
+        float3 indirect = sample_naive_regir(hit_position, normalize(ray_data.normal), launch_index);
+        shaded.rgb += indirect * 0.6f;
+    }
+
+    shaded.rgb = shaded.rgb / (1.0f + shaded.rgb);
+    float4 debug_color = shade_ray_complexity(shaded, ray_data.step_count);
+    output_image[launch_index] = overlay_fps_counter(launch_index, launch_size, shaded);
 //     output_image[launch_index] = overlay_fps_counter(launch_index, launch_size, debug_color);
 }
