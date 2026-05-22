@@ -6,8 +6,17 @@ pub const REGION_GRID_DIMENSIONS: UVec3 = UVec3::new(8, 8, 8);
 pub const REGION_COUNT: usize = 512;
 pub const MASK_WORD_BITS: usize = u32::BITS as usize;
 pub const MASK_WORD_COUNT: usize = 16;
-pub const LEAF_MASK_WORD_OFFSET: usize = MASK_WORD_COUNT;
-pub const CHUNK_OCCUPANCY_WORD_COUNT: usize = MASK_WORD_COUNT + REGION_COUNT * MASK_WORD_COUNT;
+pub const MIP64_REGION_AXIS: usize = 4;
+pub const MIP64_REGION_COUNT: usize = 64;
+pub const MIP64_WORD_COUNT: usize = 2;
+pub const MIP8_REGION_AXIS: usize = 2;
+pub const MIP8_REGION_COUNT: usize = 8;
+pub const MIP8_WORD_COUNT: usize = 1;
+pub const REGION_MASK_WORD_OFFSET: usize = 0;
+pub const MIP64_MASK_WORD_OFFSET: usize = REGION_MASK_WORD_OFFSET + MASK_WORD_COUNT;
+pub const MIP8_MASK_WORD_OFFSET: usize = MIP64_MASK_WORD_OFFSET + MIP64_WORD_COUNT;
+pub const LEAF_MASK_WORD_OFFSET: usize = MIP8_MASK_WORD_OFFSET + MIP8_WORD_COUNT;
+pub const CHUNK_OCCUPANCY_WORD_COUNT: usize = LEAF_MASK_WORD_OFFSET + REGION_COUNT * MASK_WORD_COUNT;
 
 #[derive(Clone, Debug)]
 pub struct VoxelModel {
@@ -90,6 +99,38 @@ pub fn region_leaf_word_offset(region_index: usize) -> usize {
     LEAF_MASK_WORD_OFFSET + region_index * MASK_WORD_COUNT
 }
 
+pub fn flatten_mip64_region_index(region_position: UVec3) -> usize {
+    debug_assert!(region_position.x < MIP64_REGION_AXIS as u32);
+    debug_assert!(region_position.y < MIP64_REGION_AXIS as u32);
+    debug_assert!(region_position.z < MIP64_REGION_AXIS as u32);
+
+    region_position.x as usize
+        + MIP64_REGION_AXIS
+            * (region_position.y as usize + MIP64_REGION_AXIS * region_position.z as usize)
+}
+
+pub fn flatten_mip8_region_index(region_position: UVec3) -> usize {
+    debug_assert!(region_position.x < MIP8_REGION_AXIS as u32);
+    debug_assert!(region_position.y < MIP8_REGION_AXIS as u32);
+    debug_assert!(region_position.z < MIP8_REGION_AXIS as u32);
+
+    region_position.x as usize
+        + MIP8_REGION_AXIS
+            * (region_position.y as usize + MIP8_REGION_AXIS * region_position.z as usize)
+}
+
+pub fn mip64_mask_bit_is_set(occupancy: &[u32], region_index: usize) -> bool {
+    debug_assert!(region_index < MIP64_REGION_COUNT);
+    let (word_index, bit_mask) = occupancy_word_and_mask(region_index);
+    occupancy[MIP64_MASK_WORD_OFFSET + word_index] & bit_mask != 0
+}
+
+pub fn mip8_mask_bit_is_set(occupancy: &[u32], region_index: usize) -> bool {
+    debug_assert!(region_index < MIP8_REGION_COUNT);
+    let (word_index, bit_mask) = occupancy_word_and_mask(region_index);
+    occupancy[MIP8_MASK_WORD_OFFSET + word_index] & bit_mask != 0
+}
+
 pub fn region_mask_bit_is_set(occupancy: &[u32], region_index: usize) -> bool {
     let (word_index, bit_mask) = occupancy_word_and_mask(region_index);
     occupancy[word_index] & bit_mask != 0
@@ -133,9 +174,11 @@ mod tests {
     use glam::{UVec3, Vec3};
 
     use super::{
-        CHUNK_DIMENSIONS, CHUNK_OCCUPANCY_WORD_COUNT, MASK_WORD_COUNT, REGION_COUNT, VoxelModel,
-        empty_chunk_occupancy, flatten_leaf_index, flatten_region_index, occupancy_bit_is_set,
-        region_leaf_word_offset, region_mask_bit_is_set, set_occupancy_bit,
+        CHUNK_DIMENSIONS, CHUNK_OCCUPANCY_WORD_COUNT, LEAF_MASK_WORD_OFFSET, MASK_WORD_COUNT,
+        MIP8_MASK_WORD_OFFSET, MIP8_WORD_COUNT, MIP64_MASK_WORD_OFFSET, MIP64_WORD_COUNT,
+        REGION_COUNT, REGION_MASK_WORD_OFFSET, VoxelModel, empty_chunk_occupancy, flatten_leaf_index,
+        flatten_region_index, occupancy_bit_is_set, region_leaf_word_offset, region_mask_bit_is_set,
+        set_occupancy_bit,
     };
 
     #[test]
@@ -143,6 +186,17 @@ mod tests {
         let occupancy = empty_chunk_occupancy();
 
         assert_eq!(occupancy.len(), CHUNK_OCCUPANCY_WORD_COUNT);
+        assert_eq!(REGION_MASK_WORD_OFFSET, 0);
+        assert_eq!(MIP64_MASK_WORD_OFFSET, MASK_WORD_COUNT);
+        assert_eq!(MIP8_MASK_WORD_OFFSET, MASK_WORD_COUNT + MIP64_WORD_COUNT);
+        assert_eq!(
+            LEAF_MASK_WORD_OFFSET,
+            MASK_WORD_COUNT + MIP64_WORD_COUNT + MIP8_WORD_COUNT
+        );
+        assert_eq!(
+            CHUNK_OCCUPANCY_WORD_COUNT,
+            LEAF_MASK_WORD_OFFSET + REGION_COUNT * MASK_WORD_COUNT
+        );
         assert!(occupancy.iter().all(|word| *word == 0));
     }
 
@@ -156,7 +210,7 @@ mod tests {
         let region_index = flatten_region_index(UVec3::new(1, 0, 2));
         assert!(region_mask_bit_is_set(&occupancy, region_index));
         assert_eq!(
-            occupancy[..MASK_WORD_COUNT]
+            occupancy[REGION_MASK_WORD_OFFSET..MIP64_MASK_WORD_OFFSET]
                 .iter()
                 .filter(|word| **word != 0)
                 .count(),
@@ -187,7 +241,7 @@ mod tests {
         assert!(occupancy_bit_is_set(&occupancy, first));
         assert!(occupancy_bit_is_set(&occupancy, second));
         assert_eq!(
-            occupancy[..MASK_WORD_COUNT]
+            occupancy[REGION_MASK_WORD_OFFSET..MIP64_MASK_WORD_OFFSET]
                 .iter()
                 .filter(|word| **word != 0)
                 .count(),
@@ -218,7 +272,7 @@ mod tests {
         assert!(occupancy_bit_is_set(&occupancy, first));
         assert!(occupancy_bit_is_set(&occupancy, second));
         assert_eq!(
-            occupancy[..MASK_WORD_COUNT]
+            occupancy[REGION_MASK_WORD_OFFSET..MIP64_MASK_WORD_OFFSET]
                 .iter()
                 .filter(|word| **word != 0)
                 .count(),
