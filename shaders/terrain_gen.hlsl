@@ -95,27 +95,34 @@ float terrain_surface_height(int2 position, uint3 dimensions, uint chunk_index)
 void terrain_gen_main(uint3 dispatch_id : SV_DispatchThreadID)
 {
     uint3 dimensions = terrain_dimensions();
-    uint chunk_index = dispatch_id.z / dimensions.z;
-    if (chunk_index >= TERRAIN_GRID_SIDE * TERRAIN_GRID_SIDE * TERRAIN_GRID_HEIGHT_LAYERS)
+    uint chunk_x = dispatch_id.x / dimensions.x;
+    uint chunk_y = dispatch_id.y / dimensions.y;
+    uint chunk_z = dispatch_id.z / dimensions.z;
+    if (chunk_x >= TERRAIN_GRID_SIDE
+        || chunk_y >= TERRAIN_GRID_HEIGHT_LAYERS
+        || chunk_z >= TERRAIN_GRID_SIDE)
     {
         return;
     }
 
+    uint local_x = dispatch_id.x % dimensions.x;
+    uint local_y = dispatch_id.y % dimensions.y;
     uint local_z = dispatch_id.z % dimensions.z;
-    if (dispatch_id.x >= dimensions.x || dispatch_id.y >= dimensions.y || local_z >= dimensions.z)
+    if (local_x >= dimensions.x || local_y >= dimensions.y || local_z >= dimensions.z)
     {
         return;
     }
 
-    uint3 local = uint3(dispatch_id.x, dispatch_id.y, local_z);
+    uint chunk_index = chunk_x
+        + TERRAIN_GRID_SIDE * (chunk_z + TERRAIN_GRID_SIDE * chunk_y);
+    uint3 local = uint3(local_x, local_y, local_z);
     uint3 region = uint3(local.x >> 3, local.y >> 3, local.z >> 3);
     uint region_index = flatten_region_index(region);
     uint3 leaf_local = uint3(local.x & 7u, local.y & 7u, local.z & 7u);
     uint leaf_index = flatten_leaf_index(leaf_local);
     uint word_offset = chunk_index * CHUNK_OCCUPANCY_WORD_COUNT;
     float surface_height = terrain_surface_height(int2(local.x, local.z), dimensions, chunk_index);
-    uint chunk_layer = terrain_chunk_coordinates(chunk_index).y;
-    float global_y = (float)(chunk_layer * dimensions.y + local.y);
+    float global_y = (float)(chunk_y * dimensions.y + local.y);
 
     if (global_y <= surface_height)
     {

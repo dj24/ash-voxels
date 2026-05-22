@@ -293,6 +293,6 @@ void ray_query_main(uint3 dispatch_id : SV_DispatchThreadID)
 
     RayData ray_data = trace_voxel_scene(ray);
     float4 debug_color = shade_ray_complexity(ray_data.color, ray_data.step_count);
-//     output_image[launch_index] = overlay_fps_counter(launch_index, launch_size, ray_data.color);
-    output_image[launch_index] = overlay_fps_counter(launch_index, launch_size, debug_color);
+    output_image[launch_index] = overlay_fps_counter(launch_index, launch_size, ray_data.color);
+//     output_image[launch_index] = overlay_fps_counter(launch_index, launch_size, debug_color);
 }

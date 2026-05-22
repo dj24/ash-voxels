@@ -8,7 +8,7 @@ use crate::{
 
 pub const TERRAIN_CHUNK_DIMENSIONS: UVec3 = CHUNK_DIMENSIONS;
 pub const TERRAIN_CHUNK_VOXEL_SIZE: f32 = 0.25;
-pub const TERRAIN_GRID_SIDE: usize = 24;
+pub const TERRAIN_GRID_SIDE: usize = 48;
 pub const TERRAIN_GRID_HEIGHT_LAYERS: usize = 4;
 pub const TERRAIN_GRID_COUNT: usize =
     TERRAIN_GRID_SIDE * TERRAIN_GRID_SIDE * TERRAIN_GRID_HEIGHT_LAYERS;
@@ -63,10 +63,9 @@ pub(crate) fn populate_voxel_buffer(
 }
 
 fn terrain_dispatch_group_counts(dimensions: UVec3) -> [u32; 3] {
-    let group_count_x = dimensions.x.div_ceil(8);
-    let group_count_y = dimensions.y.div_ceil(4);
-    let total_depth = dimensions.z * TERRAIN_GRID_COUNT as u32;
-    let group_count_z = total_depth.div_ceil(8);
+    let group_count_x = dimensions.x.div_ceil(8) * TERRAIN_GRID_SIDE as u32;
+    let group_count_y = dimensions.y.div_ceil(4) * TERRAIN_GRID_HEIGHT_LAYERS as u32;
+    let group_count_z = dimensions.z.div_ceil(8) * TERRAIN_GRID_SIDE as u32;
     [group_count_x, group_count_y, group_count_z]
 }
 
@@ -102,8 +101,8 @@ mod tests {
         assert_eq!(TERRAIN_GRID_HEIGHT_LAYERS, 4);
         assert_eq!(
             positions.first().copied(),
-            Some(Vec3::new(-46.0, 0.0, -69.0))
+            Some(Vec3::new(-94.0, 0.0, -141.0))
         );
-        assert_eq!(positions.last().copied(), Some(Vec3::new(46.0, 3.0, 69.0)));
+        assert_eq!(positions.last().copied(), Some(Vec3::new(94.0, 3.0, 141.0)));
     }
 }
