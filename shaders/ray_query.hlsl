@@ -263,6 +263,7 @@ void ray_query_main(uint3 dispatch_id : SV_DispatchThreadID)
     float2 pixel_center = (float2(launch_index) + 0.5f) / float2(launch_size);
     float2 ndc = pixel_center * 2.0f - 1.0f;
     ndc.y = -ndc.y;
+    motion_vectors_output[launch_index] = float2(0.0f, 0.0f);
 
     float aspect = scene_uniform.viewport.z;
     float tan_half_fov = scene_uniform.viewport.w;

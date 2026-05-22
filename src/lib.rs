@@ -5,4 +5,5 @@ pub mod render;
 pub mod scene;
 pub mod shader_build;
 pub mod terrain;
+pub mod upscaling;
 pub mod vk;

@@ -15,14 +15,16 @@ use winit::{
     window::Window,
 };
 
-use crate::{ecs, render::Renderer, terrain, vk::AppError};
+use crate::{ecs, render::Renderer, terrain, upscaling, vk::AppError};
 
 const DEFAULT_CAPTURE_SIZE: [u32; 2] = [1280, 720];
 
 pub fn run() -> Result<(), AppError> {
     init_tracing();
 
-    match RuntimeConfig::from_env()?.launch_mode {
+    let config = RuntimeConfig::from_env()?;
+    info!("Upscaling mode: {:?}", config.upscaling_mode);
+    match config.launch_mode {
         LaunchMode::Interactive => run_interactive(),
         LaunchMode::HeadlessCapture { output_path, delay } => run_headless(&output_path, delay),
     }
@@ -62,6 +64,7 @@ fn init_tracing() {
 #[derive(Debug, PartialEq, Eq)]
 struct RuntimeConfig {
     launch_mode: LaunchMode,
+    upscaling_mode: upscaling::UpscalingMode,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -86,6 +89,7 @@ where
 {
     let mut output_path = None;
     let mut delay = None;
+    let mut upscaler = None;
     let mut args = args.into_iter().map(Into::into);
 
     while let Some(arg) = args.next() {
@@ -111,6 +115,11 @@ where
                 })?;
                 delay = Some(Duration::from_millis(parsed));
             }
+            "--upscaler" => {
+                upscaler = Some(args.next().ok_or_else(|| {
+                    AppError::Message("expected upscaler mode after --upscaler".to_string())
+                })?);
+            }
             _ => {
                 return Err(AppError::Message(format!(
                     "unrecognized launch argument {arg:?}"
@@ -119,12 +128,18 @@ where
         }
     }
 
+    let upscaling_mode =
+        upscaling::UpscalingMode::from_flag(upscaler.as_deref()).map_err(AppError::Message)?;
+    upscaling::initialize(upscaling_mode);
+
     match (output_path, delay) {
         (None, None) => Ok(RuntimeConfig {
             launch_mode: LaunchMode::Interactive,
+            upscaling_mode,
         }),
         (Some(output_path), Some(delay)) => Ok(RuntimeConfig {
             launch_mode: LaunchMode::HeadlessCapture { output_path, delay },
+            upscaling_mode,
         }),
         (Some(_), None) => Err(AppError::Message(
             "--delay-ms is required when using --headless-png".to_string(),

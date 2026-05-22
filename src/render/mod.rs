@@ -82,6 +82,7 @@ pub struct Renderer {
     output_image: AllocatedImage,
     coarse_depth_image: AllocatedImage,
     capture_image: AllocatedImage,
+    motion_vectors_image: AllocatedImage,
     readback_buffer: AllocatedBuffer,
     uniform_buffer: AllocatedBuffer,
     object_buffer: AllocatedBuffer,
@@ -374,6 +375,7 @@ impl Renderer {
             output_image: AllocatedImage::default(),
             coarse_depth_image: AllocatedImage::default(),
             capture_image: AllocatedImage::default(),
+            motion_vectors_image: AllocatedImage::default(),
             readback_buffer: AllocatedBuffer::default(),
             uniform_buffer: AllocatedBuffer::default(),
             object_buffer: AllocatedBuffer::default(),
@@ -406,6 +408,11 @@ impl Renderer {
                     "output image",
                 )?;
                 renderer.capture_image = renderer.create_capture_image(renderer.extent)?;
+                renderer.motion_vectors_image = renderer.create_storage_image(
+                    renderer.extent,
+                    vk::Format::R16G16_SFLOAT,
+                    "motion vectors",
+                )?;
                 renderer.readback_buffer = renderer.create_readback_buffer(renderer.extent)?;
             }
         }
@@ -742,12 +749,21 @@ impl Renderer {
                 .expect("renderer allocator should exist"),
             &mut self.output_image,
         )?;
+        destroy_image_with(
+            &self.device,
+            self.allocator
+                .as_mut()
+                .expect("renderer allocator should exist"),
+            &mut self.motion_vectors_image,
+        )?;
 
         self.swapchain = new_swapchain;
         self.swapchain_images = new_images;
         self.swapchain_initialized = vec![false; self.swapchain_images.len()];
         self.swapchain_format = chosen_format;
         self.output_image = output_image;
+        self.motion_vectors_image =
+            self.create_storage_image(self.extent, vk::Format::R16G16_SFLOAT, "motion vectors")?;
         self.recreate_render_finished_semaphores(self.swapchain_images.len())?;
 
         Ok(())
@@ -795,6 +811,11 @@ impl Renderer {
                 .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
                 .descriptor_count(1)
                 .stage_flags(vk::ShaderStageFlags::COMPUTE),
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(8)
+                .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::COMPUTE),
         ];
 
         self.descriptor_set_layout = unsafe {
@@ -807,7 +828,7 @@ impl Renderer {
         let pool_sizes = [
             vk::DescriptorPoolSize {
                 ty: vk::DescriptorType::STORAGE_IMAGE,
-                descriptor_count: 2,
+                descriptor_count: 3,
             },
             vk::DescriptorPoolSize {
                 ty: vk::DescriptorType::ACCELERATION_STRUCTURE_KHR,
@@ -1189,6 +1210,9 @@ impl Renderer {
         let coarse_depth_output_info = [vk::DescriptorImageInfo::default()
             .image_layout(vk::ImageLayout::GENERAL)
             .image_view(self.coarse_depth_image.view)];
+        let motion_vectors_info = [vk::DescriptorImageInfo::default()
+            .image_layout(vk::ImageLayout::GENERAL)
+            .image_view(self.motion_vectors_image.view)];
         let uniform_info = [vk::DescriptorBufferInfo::default()
             .buffer(self.uniform_buffer.buffer)
             .offset(0)
@@ -1247,6 +1271,11 @@ impl Renderer {
                 .dst_binding(7)
                 .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
                 .image_info(&coarse_depth_output_info),
+            vk::WriteDescriptorSet::default()
+                .dst_set(self.descriptor_set)
+                .dst_binding(8)
+                .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
+                .image_info(&motion_vectors_info),
         ];
 
         unsafe { self.device.update_descriptor_sets(&writes, &[]) };
@@ -1712,8 +1741,7 @@ impl Renderer {
                     .get_physical_device_format_properties(self.physical_device, format)
             };
             if props.optimal_tiling_features.contains(
-                vk::FormatFeatureFlags::STORAGE_IMAGE
-                    | vk::FormatFeatureFlags::SAMPLED_IMAGE,
+                vk::FormatFeatureFlags::STORAGE_IMAGE | vk::FormatFeatureFlags::SAMPLED_IMAGE,
             ) {
                 return Ok(format);
             }
@@ -2201,6 +2229,13 @@ impl Drop for Renderer {
                 .as_mut()
                 .expect("renderer allocator should exist"),
             &mut self.capture_image,
+        );
+        let _ = destroy_image_with(
+            &self.device,
+            self.allocator
+                .as_mut()
+                .expect("renderer allocator should exist"),
+            &mut self.motion_vectors_image,
         );
         let _ = destroy_buffer_with(
             &self.device,
