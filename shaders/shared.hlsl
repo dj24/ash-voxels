@@ -36,6 +36,7 @@ struct HitAttributes
 [[vk::binding(4, 0)]] StructuredBuffer<uint> voxel_occupancy;
 [[vk::binding(5, 0)]] Texture2D<float> coarse_depth_texture;
 [[vk::binding(6, 0)]] SamplerState coarse_depth_sampler;
+[[vk::binding(7, 0)]] RWTexture2D<float> coarse_depth_output;
 
 static const float PI = 3.1415926535f;
 static const float COARSE_DEPTH_NEAR = 0.1f;

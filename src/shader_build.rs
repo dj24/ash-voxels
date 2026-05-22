@@ -3,7 +3,7 @@ use std::path::PathBuf;
 pub const SHADER_ARTIFACTS: &[&str] = &[
     "ray_query.spv",
     "terrain_gen.spv",
-    "coarse_depth_prepass.spv",
+    "coarse_depth_trace.spv",
     "coarse_depth_debug.spv",
 ];
 

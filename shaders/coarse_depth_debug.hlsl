@@ -14,13 +14,9 @@ void coarse_depth_debug_main(uint3 dispatch_id : SV_DispatchThreadID)
     float2 uv = (float2(dispatch_id.xy) + 0.5f) / float2(output_width, output_height);
     float depth = coarse_depth_texture.SampleLevel(coarse_depth_sampler, uv, 0.0f);
     float intensity = 0.0f;
-    if (depth < 1.0f)
+    if (depth > 0.0f)
     {
-        float linear_depth =
-            (COARSE_DEPTH_NEAR * COARSE_DEPTH_FAR)
-            / (COARSE_DEPTH_FAR - depth * (COARSE_DEPTH_FAR - COARSE_DEPTH_NEAR));
-        intensity = linear_depth;
-        intensity  = linear_depth / COARSE_DEPTH_FAR;
+        intensity = saturate(depth / COARSE_DEPTH_FAR);
     }
 
     output_image[dispatch_id.xy] = float4(intensity, intensity, intensity, 1.0f);

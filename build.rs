@@ -24,9 +24,9 @@ const SHADERS: &[ShaderSpec<'_>] = &[
         profile: "cs_6_3",
     },
     ShaderSpec {
-        file_name: "coarse_depth_prepass.hlsl",
-        entry_point: "coarse_depth_prepass_main",
-        profile: "vs_6_3",
+        file_name: "coarse_depth_trace.hlsl",
+        entry_point: "coarse_depth_trace_main",
+        profile: "cs_6_5",
     },
     ShaderSpec {
         file_name: "coarse_depth_debug.hlsl",

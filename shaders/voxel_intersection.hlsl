@@ -15,6 +15,25 @@ bool region_occupancy_at(int3 position, uint3 dimensions, uint instance_id)
     return (region_word & occupancy_bit_mask(region_index)) != 0u;
 }
 
+uint3 region_grid_dimensions(uint3 voxel_dimensions)
+{
+    return max((voxel_dimensions + (REGION_AXIS - 1u)) / REGION_AXIS, 1u);
+}
+
+bool region_mask_at_region_coord(int3 region_position, uint3 voxel_dimensions, uint instance_id)
+{
+    uint3 region_dims = region_grid_dimensions(voxel_dimensions);
+    if (any(region_position < 0) || any(region_position >= int3(region_dims)))
+    {
+        return false;
+    }
+
+    uint region_index = flatten_region_index(uint3(region_position));
+    uint offset = instance_id * CHUNK_OCCUPANCY_WORD_COUNT;
+    uint region_word = voxel_occupancy[offset + occupancy_word_index(region_index)];
+    return (region_word & occupancy_bit_mask(region_index)) != 0u;
+}
+
 float occupancy_at(int3 position, uint3 dimensions, uint instance_id)
 {
     if (!region_occupancy_at(position, dimensions, instance_id))
@@ -31,6 +50,56 @@ float occupancy_at(int3 position, uint3 dimensions, uint instance_id)
     uint leaf_word = voxel_occupancy[
         offset + leaf_mask_word_offset(region_index) + occupancy_word_index(leaf_index)];
     return (leaf_word & occupancy_bit_mask(leaf_index)) == 0u ? 0.0f : 1.0f;
+}
+
+bool ray_box(
+    float3 origin,
+    float3 direction,
+    float3 bounds_min,
+    float3 bounds_max,
+    float ray_t_min,
+    float ray_t_max,
+    out float t_enter,
+    out float t_exit);
+
+bool enter_voxel_object(
+    float3 origin,
+    float3 direction,
+    float ray_t_min,
+    float ray_t_max,
+    RenderObjectData object,
+    out float3 bounds_min,
+    out float3 bounds_max,
+    out float voxel_size,
+    out uint3 grid_dims,
+    out float3 extent,
+    out float t_enter,
+    out float t_exit)
+{
+    bounds_min = object.bounds_min.xyz;
+    bounds_max = object.bounds_max.xyz;
+    voxel_size = object.voxel_size_and_dimensions.x;
+    grid_dims = uint3(
+        max(1, (int)object.voxel_size_and_dimensions.y),
+        max(1, (int)object.voxel_size_and_dimensions.z),
+        max(1, (int)object.voxel_size_and_dimensions.w));
+    extent = bounds_max - bounds_min;
+    return ray_box(origin, direction, bounds_min, bounds_max, ray_t_min, ray_t_max, t_enter, t_exit);
+}
+
+int3 initial_grid_cell(
+    float3 origin,
+    float3 direction,
+    float t_enter,
+    float3 bounds_min,
+    float3 bounds_max,
+    float3 extent,
+    uint3 grid_dims)
+{
+    float3 local_point = clamp(origin + direction * t_enter, bounds_min, bounds_max - 1e-4f);
+    float3 relative = saturate(
+        (local_point - bounds_min) / max(extent, float3(1e-5f, 1e-5f, 1e-5f)));
+    return min(int3(relative * float3(grid_dims)), int3(grid_dims) - 1);
 }
 
 void rebuild_dda_state(
@@ -95,6 +164,107 @@ bool ray_box(
     return t_exit >= t_enter;
 }
 
+bool intersect_occupied_region_object(
+    float3 origin,
+    float3 direction,
+    float ray_t_min,
+    float ray_t_max,
+    RenderObjectData object,
+    uint instance_id,
+    out float hit_t,
+    out uint step_count)
+{
+    float3 bounds_min;
+    float3 bounds_max;
+    float voxel_size;
+    uint3 grid_dims;
+    float3 extent;
+    float t_enter;
+    float t_exit;
+    step_count = 0u;
+
+    if (!enter_voxel_object(
+        origin,
+        direction,
+        ray_t_min,
+        ray_t_max,
+        object,
+        bounds_min,
+        bounds_max,
+        voxel_size,
+        grid_dims,
+        extent,
+        t_enter,
+        t_exit))
+    {
+        hit_t = 0.0f;
+        return false;
+    }
+
+    uint3 region_dims = region_grid_dimensions(grid_dims);
+    float region_size = voxel_size * (float)REGION_AXIS;
+    int3 cell = initial_grid_cell(
+        origin,
+        direction,
+        t_enter,
+        bounds_min,
+        bounds_max,
+        extent,
+        region_dims);
+
+    int3 step_dir = int3(
+        direction.x >= 0.0f ? 1 : -1,
+        direction.y >= 0.0f ? 1 : -1,
+        direction.z >= 0.0f ? 1 : -1);
+
+    float3 t_max;
+    rebuild_dda_state(origin, direction, bounds_min, region_size, cell, t_max);
+    float3 t_delta = abs(region_size / max(abs(direction), 1e-5f));
+
+    [loop]
+    for (uint step_index = 0; step_index < REGION_COUNT; ++step_index)
+    {
+        if (any(cell < 0) || any(cell >= int3(region_dims)))
+        {
+            break;
+        }
+
+        step_count += 1u;
+        if (region_mask_at_region_coord(cell, grid_dims, instance_id))
+        {
+            hit_t = max(t_enter, ray_t_min);
+            return true;
+        }
+
+        if (t_max.x < t_max.y && t_max.x < t_max.z)
+        {
+            t_enter = t_max.x;
+            t_max.x += t_delta.x;
+            cell.x += step_dir.x;
+        }
+        else if (t_max.y < t_max.z)
+        {
+            t_enter = t_max.y;
+            t_max.y += t_delta.y;
+            cell.y += step_dir.y;
+        }
+        else
+        {
+            t_enter = t_max.z;
+            t_max.z += t_delta.z;
+            cell.z += step_dir.z;
+        }
+
+        if (t_enter > t_exit || t_enter > ray_t_max)
+        {
+            break;
+        }
+    }
+
+    hit_t = 0.0f;
+    return false;
+}
+
 bool intersect_voxel_object(
     float3 origin,
     float3 direction,
@@ -106,28 +276,41 @@ bool intersect_voxel_object(
     out float3 hit_normal,
     out uint step_count)
 {
-    float3 bounds_min = object.bounds_min.xyz;
-    float3 bounds_max = object.bounds_max.xyz;
-    float voxel_size = object.voxel_size_and_dimensions.x;
-    uint3 grid_dims = uint3(
-        max(1, (int)object.voxel_size_and_dimensions.y),
-        max(1, (int)object.voxel_size_and_dimensions.z),
-        max(1, (int)object.voxel_size_and_dimensions.w));
-
+    float3 bounds_min;
+    float3 bounds_max;
+    float voxel_size;
+    uint3 grid_dims;
+    float3 extent;
     float t_enter;
     float t_exit;
     step_count = 0u;
-    if (!ray_box(origin, direction, bounds_min, bounds_max, ray_t_min, ray_t_max, t_enter, t_exit))
+    if (!enter_voxel_object(
+        origin,
+        direction,
+        ray_t_min,
+        ray_t_max,
+        object,
+        bounds_min,
+        bounds_max,
+        voxel_size,
+        grid_dims,
+        extent,
+        t_enter,
+        t_exit))
     {
         hit_t = 0.0f;
         hit_normal = float3(0.0f, 1.0f, 0.0f);
         return false;
     }
 
-    float3 extent = bounds_max - bounds_min;
-    float3 local_point = clamp(origin + direction * t_enter, bounds_min, bounds_max - 1e-4f);
-    float3 relative = saturate((local_point - bounds_min) / max(extent, float3(1e-5f, 1e-5f, 1e-5f)));
-    int3 cell = min(int3(relative * float3(grid_dims)), int3(grid_dims) - 1);
+    int3 cell = initial_grid_cell(
+        origin,
+        direction,
+        t_enter,
+        bounds_min,
+        bounds_max,
+        extent,
+        grid_dims);
 
     int3 step_dir = int3(
         direction.x >= 0.0f ? 1 : -1,
