@@ -116,12 +116,6 @@ float4 overlay_fps_counter(uint2 launch_index, uint2 launch_size, float4 color)
     return float4(composited, color.a);
 }
 
-float coarse_depth_to_linear_distance(float depth)
-{
-    return (COARSE_DEPTH_NEAR * COARSE_DEPTH_FAR)
-        / (COARSE_DEPTH_FAR - depth * (COARSE_DEPTH_FAR - COARSE_DEPTH_NEAR));
-}
-
 float4 shade_sky(float3 direction)
 {
     float sky = 0.5f * (direction.y + 1.0f);
@@ -223,6 +217,39 @@ RayData trace_voxel_scene(RayDesc ray)
     return best_hit;
 }
 
+float sample_min_coarse_depth(float2 uv)
+{
+    uint coarse_width, coarse_height;
+    coarse_depth_texture.GetDimensions(coarse_width, coarse_height);
+    if (coarse_width == 0 || coarse_height == 0)
+    {
+        return 0.0f;
+    }
+
+    int2 coarse_size = int2(coarse_width, coarse_height);
+    int2 center = clamp(int2(uv * float2(coarse_width, coarse_height)), int2(0, 0), coarse_size - 1);
+    float min_depth = 0.0f;
+
+    [unroll]
+    for (int dy = -1; dy <= 1; ++dy)
+    {
+        [unroll]
+        for (int dx = -1; dx <= 1; ++dx)
+        {
+            int2 sample_coord = clamp(center + int2(dx, dy), int2(0, 0), coarse_size - 1);
+            float sample_depth = coarse_depth_texture.Load(int3(sample_coord, 0));
+            if (sample_depth <= 0.0f)
+            {
+                continue;
+            }
+
+            min_depth = min_depth > 0.0f ? min(min_depth, sample_depth) : sample_depth;
+        }
+    }
+
+    return min_depth;
+}
+
 [numthreads(8, 8, 1)]
 void ray_query_main(uint3 dispatch_id : SV_DispatchThreadID)
 {
@@ -251,13 +278,12 @@ void ray_query_main(uint3 dispatch_id : SV_DispatchThreadID)
     ray.TMin = 0.001f;
     ray.TMax = 1000.0f;
 
-    float depth = coarse_depth_texture.SampleLevel(coarse_depth_sampler, pixel_center, 0.0f);
+    float depth = sample_min_coarse_depth(pixel_center);
     float coarse_depth_bias = 0.5f;
-//     if (depth < 1.0f)
-//     {
-//         float linear_depth = coarse_depth_to_linear_distance(depth);
-//         ray.TMin = clamp(linear_depth - coarse_depth_bias, 0.001f, ray.TMax - 0.001f);
-//     }
+    if (depth > 0.0f)
+    {
+        ray.TMin = clamp(depth - coarse_depth_bias, 0.001f, ray.TMax - 0.001f);
+    }
 
     RayData ray_data = trace_voxel_scene(ray);
     float4 debug_color = shade_ray_complexity(ray_data.color, ray_data.step_count);

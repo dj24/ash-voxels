@@ -93,6 +93,7 @@ pub struct Renderer {
     descriptor_set_layout: vk::DescriptorSetLayout,
     descriptor_set: vk::DescriptorSet,
     pipeline_layout: vk::PipelineLayout,
+    pipeline: vk::Pipeline,
     coarse_depth_pipeline: vk::Pipeline,
     coarse_depth_debug_pipeline: vk::Pipeline,
     acceleration_loader: ash::khr::acceleration_structure::Device,
@@ -384,6 +385,7 @@ impl Renderer {
             descriptor_set_layout: vk::DescriptorSetLayout::null(),
             descriptor_set: vk::DescriptorSet::null(),
             pipeline_layout: vk::PipelineLayout::null(),
+            pipeline: vk::Pipeline::null(),
             coarse_depth_pipeline: vk::Pipeline::null(),
             coarse_depth_debug_pipeline: vk::Pipeline::null(),
             acceleration_loader,
@@ -437,6 +439,7 @@ impl Renderer {
         renderer.scene_acceleration = renderer.create_scene_acceleration(model)?;
         renderer.update_descriptor_set()?;
         renderer.populate_voxel_buffer(model)?;
+        renderer.create_primary_ray_pipeline()?;
         renderer.create_coarse_depth_trace_pipeline()?;
 
         info!("Selected device {}", renderer.device_caps.device_name);
@@ -1072,6 +1075,11 @@ impl Renderer {
         })
     }
 
+    fn create_primary_ray_pipeline(&mut self) -> Result<(), AppError> {
+        self.pipeline = self.create_compute_pipeline("ray_query.spv", c"ray_query_main")?;
+        Ok(())
+    }
+
     fn create_coarse_depth_trace_pipeline(&mut self) -> Result<(), AppError> {
         self.coarse_depth_pipeline =
             self.create_compute_pipeline("coarse_depth_trace.spv", c"coarse_depth_trace_main")?;
@@ -1269,7 +1277,7 @@ impl Renderer {
 
     fn record_render_to_output_commands(&mut self) {
         self.record_coarse_depth_trace_commands();
-        self.record_coarse_depth_debug_commands();
+        self.record_ray_query_output_commands();
     }
 
     fn record_coarse_depth_trace_commands(&mut self) {
@@ -1339,7 +1347,7 @@ impl Renderer {
         self.coarse_depth_image.layout = vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL;
     }
 
-    fn record_coarse_depth_debug_commands(&mut self) {
+    fn record_ray_query_output_commands(&mut self) {
         let (src_stage, src_access) = match self.output_image.layout {
             vk::ImageLayout::GENERAL => (
                 vk::PipelineStageFlags::COMPUTE_SHADER,
@@ -1373,7 +1381,7 @@ impl Renderer {
             self.device.cmd_bind_pipeline(
                 self.command_buffer,
                 vk::PipelineBindPoint::COMPUTE,
-                self.coarse_depth_debug_pipeline,
+                self.pipeline,
             );
             self.device.cmd_bind_descriptor_sets(
                 self.command_buffer,
@@ -2081,6 +2089,9 @@ impl Drop for Renderer {
         let _ = self.wait_idle();
 
         unsafe {
+            if self.pipeline != vk::Pipeline::null() {
+                self.device.destroy_pipeline(self.pipeline, None);
+            }
             if self.coarse_depth_debug_pipeline != vk::Pipeline::null() {
                 self.device
                     .destroy_pipeline(self.coarse_depth_debug_pipeline, None);
