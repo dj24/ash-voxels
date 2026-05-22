@@ -279,11 +279,17 @@ void ray_query_main(uint3 dispatch_id : SV_DispatchThreadID)
     ray.TMax = 1000.0f;
 
     float depth = sample_min_coarse_depth(pixel_center);
-    float coarse_depth_bias = 0.5f;
-    if (depth > 0.0f)
+    if (depth <= 0.0f)
     {
-        ray.TMin = clamp(depth - coarse_depth_bias, 0.001f, ray.TMax - 0.001f);
+        output_image[launch_index] = overlay_fps_counter(
+            launch_index,
+            launch_size,
+            shade_sky(ray_direction));
+        return;
     }
+
+    float coarse_depth_bias = 0.5f;
+    ray.TMin = clamp(depth - coarse_depth_bias, 0.001f, ray.TMax - 0.001f);
 
     RayData ray_data = trace_voxel_scene(ray);
     float4 debug_color = shade_ray_complexity(ray_data.color, ray_data.step_count);
